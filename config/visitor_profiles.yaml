@@ -1,0 +1,39 @@
+# 来場者プロファイル既定値(§6.3 の表)
+# interest_mode:
+#   uniform    : 興味を U(0,1) で生成
+#   focused    : 特定カテゴリ U(0.7,1.0)、他 U(0,0.4)(目的志向)
+#   dispersed  : 全カテゴリ U(0.4,0.8)(回遊型・興味分散)
+# distance_weight_factor: 効用の w_distance に乗じる係数(ゆっくり=距離負担係数 高)
+profiles:
+  - name: "標準"
+    ratio: 0.40
+    speed_mps: 1.2
+    congestion_avoidance: 1.0
+    queue_tolerance_seconds: 300
+    max_visit_seconds: 2700
+    distance_weight_factor: 1.0
+    interest_mode: uniform
+  - name: "ゆっくり"
+    ratio: 0.20
+    speed_mps: 0.8
+    congestion_avoidance: 2.0
+    queue_tolerance_seconds: 300
+    max_visit_seconds: 3000
+    distance_weight_factor: 1.5
+    interest_mode: uniform
+  - name: "目的志向"
+    ratio: 0.20
+    speed_mps: 1.2
+    congestion_avoidance: 0.5
+    queue_tolerance_seconds: 600
+    max_visit_seconds: 1800
+    distance_weight_factor: 1.0
+    interest_mode: focused
+  - name: "回遊型"
+    ratio: 0.20
+    speed_mps: 1.2
+    congestion_avoidance: 2.0
+    queue_tolerance_seconds: 150
+    max_visit_seconds: 3600
+    distance_weight_factor: 1.0
+    interest_mode: dispersed

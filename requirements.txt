@@ -1,0 +1,14 @@
+numpy
+scipy
+pandas
+matplotlib
+pymoo
+pyyaml
+
+# 任意(§22)
+# numba
+# tqdm
+# joblib
+
+# テスト
+pytest

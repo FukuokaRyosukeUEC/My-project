@@ -1,0 +1,58 @@
+# 6 ブースの既定仕様(§5)。attractiveness は [0,1] に正規化済み(§8)。
+# width/height はセル数、mean_service_seconds は平均体験時間、
+# capacity は同時体験可能人数、max_queue_length は待ち行列セル数=最大待機人数(§5.2)。
+booths:
+  - booth_id: 0
+    name: "飲食A(キッチンカー)"
+    width: 4
+    height: 3
+    category: food
+    attractiveness: 0.9
+    capacity: 4
+    mean_service_seconds: 120
+    max_queue_length: 6
+  - booth_id: 1
+    name: "飲食B(屋台)"
+    width: 4
+    height: 3
+    category: food
+    attractiveness: 0.7
+    capacity: 4
+    mean_service_seconds: 90
+    max_queue_length: 6
+  - booth_id: 2
+    name: "物販"
+    width: 3
+    height: 3
+    category: goods
+    attractiveness: 0.6
+    capacity: 3
+    mean_service_seconds: 60
+    max_queue_length: 5
+  - booth_id: 3
+    name: "体験ワークショップ"
+    width: 5
+    height: 4
+    category: workshop
+    attractiveness: 0.8
+    capacity: 6
+    mean_service_seconds: 300
+    max_queue_length: 4
+  - booth_id: 4
+    name: "展示"
+    width: 4
+    height: 4
+    category: exhibit
+    attractiveness: 0.5
+    capacity: 8
+    mean_service_seconds: 180
+    max_queue_length: 3
+  - booth_id: 5
+    name: "ゲーム"
+    width: 3
+    height: 2
+    category: game
+    attractiveness: 0.75
+    capacity: 2
+    mean_service_seconds: 90
+    max_queue_length: 8

@@ -1,0 +1,175 @@
+"""visualization.py — 最適化終了後の可視化(§20)。最適化中は使用しない(§17.1)。"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# 日本語ラベル用フォント(存在するもののみ適用)
+for _f in ("Noto Sans CJK JP", "IPAexGothic", "Hiragino Sans", "Yu Gothic", "Meiryo"):
+    try:
+        import matplotlib.font_manager as _fm
+
+        if any(f.name == _f for f in _fm.fontManager.ttflist):
+            plt.rcParams["font.family"] = _f
+            break
+    except Exception:  # pragma: no cover
+        break
+import numpy as np
+import pandas as pd
+from matplotlib import animation
+from matplotlib.patches import Rectangle
+
+from .models import (
+    BOOTH,
+    CHOOSING,
+    ENTRANCE,
+    EXIT,
+    EXITING,
+    EXPERIENCING,
+    FORBIDDEN,
+    QUEUE,
+    QUEUING,
+    WALKING,
+    Config,
+)
+from .venue import Layout
+
+#: §20.1 エージェント色分け(赤=移動不可待機は blocked_count で近似表示)
+STATE_COLORS = {
+    CHOOSING: "#1f77b4",
+    WALKING: "#1f77b4",   # 青: ブースへ移動中
+    QUEUING: "#ffcc00",   # 黄: 待ち行列
+    EXPERIENCING: "#2ca02c",  # 緑: 体験中
+    EXITING: "#9467bd",   # 紫: 出口へ移動中
+}
+BLOCKED_COLOR = "#d62728"  # 赤: セル容量により移動できず待機中
+
+_CELL_FACE = {
+    BOOTH: "#8c564b",
+    QUEUE: "#f7e8a0",
+    ENTRANCE: "#a6d8a8",
+    EXIT: "#f4a9a8",
+    FORBIDDEN: "#e6e6e6",
+}
+
+
+def draw_venue(ax, cfg: Config, layout: Layout) -> None:
+    """会場・ブース・受付・行列セルの静的描画。"""
+    H, W = cfg.grid_height, cfg.grid_width
+    ax.set_xlim(-0.5, W - 0.5)
+    ax.set_ylim(H - 0.5, -0.5)  # y は下へ増加(§3.5)
+    ax.set_aspect("equal")
+    grid = layout.grid
+    for ctype, color in _CELL_FACE.items():
+        ys, xs = np.where(grid == ctype)
+        for x, y in zip(xs, ys):
+            ax.add_patch(Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor=color, edgecolor="none"))
+    for b, (bx, by) in enumerate(layout.positions):
+        spec = cfg.booths[b]
+        ax.add_patch(
+            Rectangle(
+                (bx - 0.5, by - 0.5), spec.width, spec.height,
+                fill=False, edgecolor="black", linewidth=1.2,
+            )
+        )
+        ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b}",
+                ha="center", va="center", fontsize=9)
+        rx, ry = layout.receptions[b]
+        ax.plot(rx, ry, marker="v", color="black", markersize=5)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def plot_pareto_front(F: np.ndarray, reps: dict[str, int], path: str | Path) -> None:
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.scatter(F[:, 0], F[:, 1], c="tab:blue", s=25, label="Pareto solutions")
+    marks = {"best_movement": ("s", "tab:green", "min f_move"),
+             "best_congestion": ("^", "tab:red", "min f_congestion"),
+             "knee": ("*", "tab:orange", "balance (knee)")}
+    for name, idx in reps.items():
+        m, c, lb = marks[name]
+        ax.scatter(F[idx, 0], F[idx, 1], marker=m, c=c, s=120, label=lb, zorder=3)
+    ax.set_xlabel("f_move: mean free-walk time [s]")
+    ax.set_ylabel("f_congestion")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def plot_heatmaps(cfg: Config, layout: Layout, heatmap, over_map, path: str | Path, title="") -> None:
+    """§20.2: 累積滞在人数と混雑閾値超過時間のヒートマップ。"""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, data, name in (
+        (axes[0], heatmap, "cumulative presence [person-steps]"),
+        (axes[1], over_map, "time over safe occupancy [s]"),
+    ):
+        masked = np.where(layout.walkable, data, np.nan)
+        im = ax.imshow(masked, cmap="hot_r", origin="upper")
+        draw_venue_outline(ax, cfg, layout)
+        ax.set_title(f"{title} {name}", fontsize=10)
+        fig.colorbar(im, ax=ax, fraction=0.04)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def draw_venue_outline(ax, cfg: Config, layout: Layout) -> None:
+    for b, (bx, by) in enumerate(layout.positions):
+        spec = cfg.booths[b]
+        ax.add_patch(Rectangle((bx - 0.5, by - 0.5), spec.width, spec.height,
+                               fill=True, facecolor="#cccccc", edgecolor="black", linewidth=1.0))
+        ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b}",
+                ha="center", va="center", fontsize=8)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def comparison_table(results: dict[str, dict], path: str | Path) -> pd.DataFrame:
+    """§20.3 の比較表を CSV へ保存し DataFrame を返す。
+
+    results: {"移動重視": kpis+目的関数 dict, ...}
+    """
+    rows = {
+        "平均自由歩行換算時間 [s]": "mean_free_walk_seconds",
+        "平均待ち時間 [s]": "mean_queue_seconds",
+        "平均ブロック待機時間 [s]": "mean_blocked_seconds",
+        "混雑度 f_congestion": "f_congestion",
+        "最大占有率": "max_cell_occupancy_ratio",
+        "体験成功率": "experience_success_rate",
+        "諦め回数": "give_up_total",
+        "平均幸福度": "mean_happiness",
+    }
+    table = pd.DataFrame(
+        {name: {label: vals.get(key, np.nan) for label, key in rows.items()}
+         for name, vals in results.items()}
+    )
+    table.to_csv(path, encoding="utf-8-sig")
+    return table
+
+
+def render_animation(cfg: Config, layout: Layout, frames, path: str | Path, fps: int = 8) -> None:
+    """§20.1: エージェントアニメーション(GIF)。frames は Simulation.record_frames の出力。"""
+    fig, ax = plt.subplots(figsize=(8, 6))
+    draw_venue(ax, cfg, layout)
+    scat = ax.scatter([], [], s=18)
+    label = ax.text(0.01, 0.99, "", transform=ax.transAxes, va="top", fontsize=9)
+
+    def update(i):
+        t, snap = frames[i]
+        xs = [s[1] for s in snap]
+        ys = [s[2] for s in snap]
+        colors = [STATE_COLORS.get(s[3], "#333333") for s in snap]
+        scat.set_offsets(np.c_[xs, ys] if xs else np.empty((0, 2)))
+        scat.set_color(colors)
+        label.set_text(f"t = {t * cfg.dt_seconds:.0f} s  agents = {len(snap)}")
+        return scat, label
+
+    ani = animation.FuncAnimation(fig, update, frames=len(frames), blit=True)
+    ani.save(path, writer=animation.PillowWriter(fps=fps))
+    plt.close(fig)

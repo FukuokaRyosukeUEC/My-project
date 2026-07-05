@@ -1,0 +1,56 @@
+# イベント会場ブース配置最適化 既定設定(仕様書 v2 準拠)
+grid:
+  width: 40          # §4.1 x 方向セル数
+  height: 30         # §4.1 y 方向セル数
+  cell_size_meters: 1.0
+
+time:
+  dt_seconds: 2.0            # §3.1
+  duration_seconds: 3600     # §3.2
+  max_speed_mps: 1.5         # §3.4 内部サブステップ数の算定に使用
+
+capacities:                  # §4.4
+  default: 3
+  queue: 2
+  entrance: 5
+  exit: 5
+
+entrance_exit:               # §4.5
+  clearance_cells: 2         # 入口・出口の周囲 2 セルはブース配置不可(FORBIDDEN)
+
+simulation:
+  n_visitors: 150            # §7
+  evaluation_seed: 42        # §2.3
+  safe_occupancy_ratio: 0.67 # §12.2
+  timeout_seconds: 5.0       # §17.6
+  replan_interval_steps: 10  # §9.3
+  blocked_replan_count: 3    # §9.3
+  softmax_temperature: 0.3   # §8
+  q_norm_seconds: 600.0      # §8 Q_norm
+  giveup_utility_penalty: 0.5   # §8 諦めブースへの減点
+  utility_min_threshold: 0.0    # §8 全候補がこの値未満なら EXITING
+
+utility_weights:             # §8 既定重み
+  interest: 1.0
+  attract: 0.5
+  distance: 1.0
+  queue: 0.8
+  crowd: 0.6
+
+arrival_profile:             # §7 [start_sec, end_sec, relative_rate]
+  - [0, 600, 1.5]
+  - [600, 2400, 1.0]
+  - [2400, 3300, 0.7]
+  - [3300, 3600, 0.2]
+
+constraints:
+  min_corridor_width: 2      # §14-8
+
+happiness:                   # §13 補助KPI
+  alpha: 0.05
+  beta: 0.1
+  gamma: 0.3
+
+optimization:                # §15
+  population_size: 64
+  n_generations: 50
