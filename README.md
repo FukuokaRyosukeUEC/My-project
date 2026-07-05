@@ -4,13 +4,117 @@
 2 次元グリッド上に 6 ブースを配置し、来場者エージェント(150 人・1 時間)をシミュレーションして、
 NSGA-II により「移動負担 f_move」と「混雑度 f_congestion」の 2 目的を同時最適化する。
 
-## セットアップ
+- リポジトリ: https://github.com/catdogpenguin/U_PoC2026_YMFS
+- 想定 Python: 3.10 以上(開発・検証は 3.12)
+
+---
+
+## 目次
+
+1. [ディレクトリ構成](#ディレクトリ構成)
+2. [セットアップ(git clone と仮想環境)](#セットアップgit-clone-と仮想環境)
+3. [使い方](#使い方)
+4. [GitHub での開発フロー](#github-での開発フロー)
+5. [検証結果](#検証結果この実装での実測)
+6. [仕様書からの主要な実装対応](#仕様書からの主要な実装対応)
+7. [実装上の設計判断](#実装上の設計判断仕様書が明示しない部分)
+
+---
+
+## ディレクトリ構成
+
+```text
+U_PoC2026_YMFS/                     # リポジトリルート
+├── README.md                       # 本ファイル
+├── requirements.txt                # 依存ライブラリ
+├── .gitignore                      # 生成物・仮想環境・キャッシュの除外設定
+├── .github/
+│   └── PULL_REQUEST_TEMPLATE.md    # PR 作成時に自動で挿入される雛形
+│
+├── config/                         # 設定の一元管理(YAML。§26)
+│   ├── default_config.yaml         #   会場・時間・容量・効用重み・到着プロファイル・最適化パラメータ
+│   ├── booths.yaml                 #   6 ブースの仕様(サイズ・カテゴリ・魅力度・収容・体験時間・行列長)
+│   └── visitor_profiles.yaml       #   来場者 4 プロファイル(速度・混雑回避・待ち耐性・興味傾向)
+│
+├── src/                            # ライブラリ本体
+│   ├── __init__.py
+│   ├── models.py                   #   セル種別/状態などの定数、dataclass 群、YAML ローダ(§2,3,5,6)
+│   ├── venue.py                    #   会場グリッド構築・入口出口・配置適用(§4,5)
+│   ├── rng.py                      #   乱数 3 系統分離ヘルパと softmax 抽選(§2.3.2)
+│   ├── routing.py                  #   BFS 静的距離場・混雑考慮 A*・勾配降下(§9)
+│   ├── constraints.py              #   配置制約チェックと違反量 g の算出(§14)
+│   ├── visitors.py                 #   来場者テーブルの決定的生成(配置非依存。§7)
+│   ├── simulator.py                #   メインループ・サブステップ移動・一括競合解決・ブース体験(§3,8,10,11)
+│   ├── metrics.py                  #   目的関数 f_move / f_congestion と補助 KPI・幸福度(§12,13)
+│   ├── parallel.py                 #   1 配置評価の入口・プロセス並列コンテキスト(§16)
+│   ├── optimization.py             #   pymoo Problem・NSGA-II・有効初期集団・代表解抽出・結果保存(§15,19)
+│   └── visualization.py            #   パレート図・ヒートマップ・比較表・アニメーション(§20)
+│
+├── scripts/                        # 実行エントリポイント(CLI)
+│   ├── benchmark.py                #   1 秒評価目標のベンチマーク(§18)
+│   ├── run_optimization.py         #   NSGA-II 最適化の実行と成果物出力
+│   └── visualize_solution.py       #   配置 JSON の可視化(ヒートマップ・GIF)
+│
+├── tests/                          # テスト(§23)
+│   ├── __init__.py
+│   ├── conftest.py                 #   共通フィクスチャ・中央密集/外周分散の手作り配置
+│   ├── test_constraints.py         #   §23.1 配置制約
+│   ├── test_movement.py            #   §23.2 セル容量・競合解決 / §23.5 目的関数の直交性
+│   ├── test_queue.py               #   §23.3 ブース体験・待ち行列・諦め
+│   └── test_reproducibility.py     #   §23.4 再現性 / §23.6 トレードオフゲート
+│
+└── results/                        # 最適化の出力先(生成物は .gitignore 対象)
+    └── .gitkeep                    #   空ディレクトリを Git 管理下に残すための placeholder
+```
+
+> 仕様書 §21 の推奨構成に対し、来場者テーブル生成を `src/visitors.py` として分離した。
+> 仕様書が挙げる `test_objectives.py` / `test_metrics.py` の内容は、
+> `test_movement.py`(目的関数の直交性)と `test_reproducibility.py`(目的関数一致・トレードオフ)に統合している。
+
+---
+
+## セットアップ(git clone と仮想環境)
+
+### 1. クローン
 
 ```bash
+git clone https://github.com/catdogpenguin/U_PoC2026_YMFS.git
+cd U_PoC2026_YMFS
+```
+
+### 2. 仮想環境(`.venv`)の作成と有効化
+
+プロジェクト直下に `.venv` を作る。`.gitignore` で除外済みなのでコミットされない。
+
+**macOS / Linux**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+**Windows(PowerShell)**
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+有効化されるとプロンプト先頭に `(.venv)` が表示される。抜けるときは `deactivate`。
+
+### 3. 依存ライブラリのインストール
+
+```bash
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Python 3.10 以上を想定(開発・検証は 3.12)。
+### 4. 動作確認
+
+```bash
+python -m pytest tests/ -q       # 全テストが通れば環境 OK
+python scripts/benchmark.py      # 1 評価あたりの計算時間を測定(§18)
+```
+
+---
 
 ## 使い方
 
@@ -21,7 +125,7 @@ python scripts/benchmark.py
 # 最適化(フル設定: pop=64, gen=50。§15)
 python scripts/run_optimization.py
 
-# 縮小設定での動作確認
+# 縮小設定での動作確認(個体数・世代数・並列数を指定)
 python scripts/run_optimization.py --pop 16 --gen 8 --workers 4
 
 # 配置 JSON の可視化(ヒートマップ・アニメーション GIF)
@@ -35,28 +139,104 @@ python -m pytest tests/ -q
 `pareto_solutions.csv`, `pareto_front.png`, `best_movement_layout.json`,
 `best_congestion_layout.json`, `knee_layout.json`, `optimization_log.csv`,
 代表 3 案のヒートマップ、比較表 CSV。
+これらは `.gitignore` 対象なので、共有したい場合は Issue や PR に個別添付するか、`git add -f` で明示的に追加する。
 
-## ディレクトリ構成(§21)
+パラメータ(会場サイズ・来場者数・ブース仕様・最適化設定など)はすべて `config/` の YAML で変更する。
+コードへ直書きしないこと(§26)。
 
+---
+
+## GitHub での開発フロー
+
+標準的な **GitHub Flow**(`main` を常にリリース可能に保ち、作業ごとにブランチを切って PR でマージ)を採用する。
+
+### 0. 初回のみ: 認証と署名設定
+
+HTTPS + [Personal Access Token](https://github.com/settings/tokens) または SSH 鍵を設定しておく。
+コミットに使う名前とメールが未設定なら:
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
 ```
-config/     default_config.yaml / booths.yaml / visitor_profiles.yaml
-src/        models, venue, rng, routing, simulator, metrics,
-            constraints, optimization, parallel, visitors, visualization
-scripts/    benchmark.py / run_optimization.py / visualize_solution.py
-tests/      §23 の各テスト(制約・移動・行列・再現性・直交性・トレードオフ)
-results/    出力先
+
+### 1. main を最新化して作業ブランチを切る
+
+ブランチ名は `種別/内容` の形式を推奨(例: `feature/queue-refactor`, `fix/astar-deadlock`, `docs/readme`)。
+
+```bash
+git switch main
+git pull origin main
+git switch -c feature/your-topic
 ```
 
-※ 仕様書の推奨構成に加え、来場者テーブル生成を `src/visitors.py` として分離した。
+### 2. 変更してコミット
+
+```bash
+git add <変更したファイル>          # 例: git add src/simulator.py tests/test_queue.py
+git status                          # 生成物(results/ など)が混ざっていないか確認
+git commit -m "待ち行列の前詰め処理を修正"
+```
+
+コミットメッセージは「何をしたか」が一目で分かる命令形で簡潔に。1 コミット 1 論点を心がける。
+
+### 3. リモートへ push
+
+初回はブランチの upstream を設定する(`-u`):
+
+```bash
+git push -u origin feature/your-topic
+```
+
+2 回目以降は `git push` だけでよい。
+
+### 4. プルリクエスト(PR)を Web の GitHub 上で作成
+
+1. ブラウザで https://github.com/catdogpenguin/U_PoC2026_YMFS を開く。
+2. push 直後なら上部に表示される **「Compare & pull request」** をクリック。
+   表示されない場合は **「Pull requests」タブ → 「New pull request」** を押し、
+   base = `main`、compare = 自分のブランチ を選択する。
+3. `.github/PULL_REQUEST_TEMPLATE.md` の内容が本文に自動で入るので、
+   概要・変更内容・仕様書との対応・テスト結果を記入し、チェックリストを埋める。
+4. 必要ならレビュアーやラベルを指定して **「Create pull request」** をクリック。
+5. レビュー指摘があれば同じブランチに追加コミットして `git push`。PR は自動更新される。
+6. 承認後、Web 上で **「Merge pull request」** を実行(`main` はスカッシュマージ推奨)。
+
+### 5. マージ後の後片付け
+
+```bash
+git switch main
+git pull origin main               # マージ結果を取り込む
+git branch -d feature/your-topic   # ローカルの作業ブランチを削除
+```
+
+リモート側のブランチは、PR マージ時に GitHub の「Delete branch」ボタンで削除できる。
+
+### コンフリクトが起きたら
+
+作業中に `main` が進んで衝突した場合:
+
+```bash
+git switch feature/your-topic
+git fetch origin
+git merge origin/main              # 衝突ファイルを編集して解決
+git add <解決したファイル>
+git commit                         # マージコミットを作成
+git push
+```
+
+---
 
 ## 検証結果(この実装での実測)
 
-- ベンチマーク(§18): ランダム有効配置 10 件、平均 0.98 s / 最大 1.06 s → **合格**
+- ベンチマーク(§18): ランダム有効配置 10 件、平均 0.98 s / 最大 1.06 s → **合格**(基準: 平均 1.0 s 以下・最大 2.0 s 以下)
 - トレードオフゲート(§23.6): 中央密集 f_move=96.8s・f_cong=2.5e-5 /
   外周分散 f_move=116.8s・f_cong=3.8e-7 → **合格**(移動と混雑の逆転を確認)
 - 再現性(§23.4): 同一配置の再評価、直列 vs 並列(2 プロセス)、
   来場者テーブルの配置非依存 → いずれも完全一致
 - 全テスト 17 件合格
+
+---
 
 ## 仕様書からの主要な実装対応
 
@@ -72,6 +252,8 @@ results/    出力先
   ブロック回数 → 残り滞在時間 → 系統3乱数。
 - **待ち行列の実セル占有(§5.2)**: フェーズ3 要件どおり実装。待機者は先頭詰めで
   行列セルを占有し、先頭入場・離脱時に前詰めされる。
+
+---
 
 ## 実装上の設計判断(仕様書が明示しない部分)
 
@@ -94,6 +276,8 @@ results/    出力先
 7. **体験成功率**: 総体験回数 / (総体験回数 + 総諦め回数) と定義。
 8. **入場スポーン**: 入口 3 セルを y 昇順に探索し空きセルへ出現。全セル満杯なら
    FIFO で次ステップへ繰り延べ、繰り延べ時間を入場遅延 KPI に計上(§4.5)。
+
+---
 
 ## 縮小設定での実行例(pop=16, gen=8)
 
