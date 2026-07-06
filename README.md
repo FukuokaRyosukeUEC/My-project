@@ -176,6 +176,18 @@ git pull origin main
 git switch -c feature/your-topic
 ```
 
+| 接頭辞           | 用途           | 例                                |
+| ------------- | ------------ | -------------------------------- |
+| `feature/`    | 新機能の追加       | `feature/user-login`             |
+| `fix/`        | バグ修正         | `fix/division-by-zero`           |
+| `docs/`       | 文書の修正        | `docs/update-readme`             |
+| `refactor/`   | 挙動を変えないコード整理 | `refactor/simulation-class`      |
+| `test/`       | テスト追加・修正     | `test/add-unit-tests`            |
+| `experiment/` | 実験的な変更       | `experiment/parallel-processing` |
+| `chore/`      | 設定・依存関係など    | `chore/update-dependencies`      |
+
+
+
 ### 2. 変更してコミット
 
 ```bash
