@@ -77,5 +77,5 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
-# Project outputs (uncomment if generated artifacts should not be tracked)
-# results/
+# Project outputs
+/results/
