@@ -1,6 +1,8 @@
 """§23.2: セル容量・一括競合解決、§23.5: 目的関数の直交性。"""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from src.metrics import free_walk_seconds
@@ -62,7 +64,10 @@ def test_capacity_not_exceeded(cfg, ctx):
 
 def test_blocked_can_move_next_substep(cfg, ctx):
     """このサブステップの退出による空きは、次サブステップから有効になり移動できる。"""
-    sim = make_sim(cfg, ctx)
+    # 20260629 の既定は 1 サブステップなので、この機構の単体検査時だけ 2 にする。
+    substep_cfg = replace(cfg, max_speed_mps=2.0)
+    layout = apply_layout(substep_cfg, ctx.venue, CENTRAL_LAYOUT)
+    sim = Simulation(substep_cfg, ctx.venue, layout, visitor_records=())
     cell_a = (5, 5)
     # cell_a を満杯(3 人)にする。うち 1 人は今ステップで外へ出る
     stayers = [make_visitor(i, cell_a) for i in range(2)]

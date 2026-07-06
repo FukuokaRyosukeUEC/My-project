@@ -1,6 +1,6 @@
 """routing.py — BFS 静的距離場・混雑考慮 A*(§9)。
 
-40×30 の 4 近傍グリッドのため、collections.deque と heapq による直接実装(§22)。
+Config で指定された 2 次元グリッドを collections.deque と heapq で探索する。
 移動は上下左右の 4 近傍(§3.5)。近傍展開順は固定し、決定性を保証する。
 """
 from __future__ import annotations

@@ -12,7 +12,14 @@ import numpy as np
 
 from .models import EMPTY, FORBIDDEN, WALKABLE_TYPES, Config
 from .routing import bfs_distance_field, INF_DIST
-from .venue import Venue, apply_layout, booth_cells_of, queue_cells_of, reception_cell
+from .venue import (
+    Venue,
+    apply_layout,
+    booth_cells_of,
+    booth_exit_cell,
+    queue_cells_of,
+    reception_cell,
+)
 
 REACHABILITY_PENALTY = 100.0
 
@@ -36,6 +43,7 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
     # 各ブースの占有セル・受付・行列セルを収集
     booth_cells = [booth_cells_of(cfg, b, *positions[b]) for b in range(n_booths)]
     receptions = [reception_cell(cfg, b, *positions[b]) for b in range(n_booths)]
+    booth_exits = [booth_exit_cell(cfg, b, *positions[b]) for b in range(n_booths)]
     qcells = [queue_cells_of(cfg, b, *positions[b]) for b in range(n_booths)]
 
     # 使用セル集合(受付+行列): 相互重複チェック用
@@ -53,9 +61,13 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
 
     # --- 項目 2: 会場外はみ出し(ブース・受付・行列)
     for b in range(n_booths):
-        g += claim(booth_cells[b])
-        g += claim([receptions[b]])
-        g += claim(qcells[b])
+        # 20260629 方式では受付が待機列先頭と同じセル。ブース内の重複は
+        # 合法なので、ブースごとに一意化してから他ブースとの競合を数える。
+        claimed = set(booth_cells[b])
+        claimed.add(receptions[b])
+        claimed.add(booth_exits[b])
+        claimed.update(qcells[b])
+        g += claim(claimed)
 
     # --- 項目 1: 重なり(ブース同士・受付・行列の相互重複)
     g += float(np.sum(np.maximum(claim_count - 1, 0)))
@@ -75,6 +87,10 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
         for (x, y) in qcells[b]:
             if _in_bounds(cfg, x, y) and base[y, x] not in (EMPTY, FORBIDDEN):
                 g += 1
+        # 体験後退出セル: EMPTY のみ許可。受付共用時の重複検査は上で一意化済み。
+        ex, ey = booth_exits[b]
+        if _in_bounds(cfg, ex, ey) and base[ey, ex] != EMPTY:
+            g += 1
 
     if g > 0:
         return g  # 幾何違反があれば到達性チェックは行わない(高速化)
@@ -93,6 +109,12 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
     for b in range(n_booths):
         rx, ry = receptions[b]
         if ent_field[ry, rx] >= INF_DIST:
+            g += REACHABILITY_PENALTY
+
+    # ブース退出セル→会場出口の到達性
+    exit_field = bfs_distance_field(walkable, venue.exit_cells)
+    for ex, ey in booth_exits:
+        if exit_field[ey, ex] >= INF_DIST:
             g += REACHABILITY_PENALTY
 
     # 項目 8: 最低通路幅(既定 2 セル)

@@ -21,6 +21,7 @@ for _f in ("Noto Sans CJK JP", "IPAexGothic", "Hiragino Sans", "Yu Gothic", "Mei
 import numpy as np
 import pandas as pd
 from matplotlib import animation
+from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 
 from .models import (
@@ -76,10 +77,12 @@ def draw_venue(ax, cfg: Config, layout: Layout) -> None:
                 fill=False, edgecolor="black", linewidth=1.2,
             )
         )
-        ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b}",
+        ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b + 1}",
                 ha="center", va="center", fontsize=9)
         rx, ry = layout.receptions[b]
         ax.plot(rx, ry, marker="v", color="black", markersize=5)
+        ex, ey = layout.booth_exits[b]
+        ax.plot(ex, ey, marker="^", color="black", markersize=5)
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -124,7 +127,7 @@ def draw_venue_outline(ax, cfg: Config, layout: Layout) -> None:
         spec = cfg.booths[b]
         ax.add_patch(Rectangle((bx - 0.5, by - 0.5), spec.width, spec.height,
                                fill=True, facecolor="#cccccc", edgecolor="black", linewidth=1.0))
-        ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b}",
+        ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b + 1}",
                 ha="center", va="center", fontsize=8)
     ax.set_xticks([])
     ax.set_yticks([])
@@ -155,20 +158,61 @@ def comparison_table(results: dict[str, dict], path: str | Path) -> pd.DataFrame
 
 def render_animation(cfg: Config, layout: Layout, frames, path: str | Path, fps: int = 8) -> None:
     """§20.1: エージェントアニメーション(GIF)。frames は Simulation.record_frames の出力。"""
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    fig.subplots_adjust(right=0.72)
     draw_venue(ax, cfg, layout)
     scat = ax.scatter([], [], s=18)
     label = ax.text(0.01, 0.99, "", transform=ax.transAxes, va="top", fontsize=9)
+    legend_handles = [
+        Line2D([0], [0], marker="o", linestyle="none", color=STATE_COLORS[WALKING],
+               label="移動中・目的地選択", markersize=6),
+        Line2D([0], [0], marker="o", linestyle="none", color=STATE_COLORS[QUEUING],
+               label="待機列", markersize=6),
+        Line2D([0], [0], marker="o", linestyle="none", color=STATE_COLORS[EXPERIENCING],
+               label="体験中（人数欄）", markersize=6),
+        Line2D([0], [0], marker="o", linestyle="none", color=STATE_COLORS[EXITING],
+               label="退出中", markersize=6),
+        Line2D([0], [0], marker="o", linestyle="none", color=BLOCKED_COLOR,
+               label="移動ブロック中", markersize=6),
+    ]
+    ax.legend(
+        handles=legend_handles,
+        title="エージェントの色",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0,
+        fontsize=8,
+        title_fontsize=9,
+    )
+    booth_count_text = ax.text(
+        1.02,
+        0.60,
+        "",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=9,
+        linespacing=1.5,
+    )
 
     def update(i):
-        t, snap = frames[i]
+        t, snap, booth_stats = frames[i]
         xs = [s[1] for s in snap]
         ys = [s[2] for s in snap]
-        colors = [STATE_COLORS.get(s[3], "#333333") for s in snap]
+        colors = [
+            BLOCKED_COLOR if s[5] > 0 else STATE_COLORS.get(s[3], "#333333")
+            for s in snap
+        ]
         scat.set_offsets(np.c_[xs, ys] if xs else np.empty((0, 2)))
         scat.set_color(colors)
         label.set_text(f"t = {t * cfg.dt_seconds:.0f} s  agents = {len(snap)}")
-        return scat, label
+        count_lines = ["ブース別人数", "（体験中 / 待機中）"]
+        count_lines.extend(
+            f"B{booth_id + 1}: {active:>2} / {queued:>2}"
+            for booth_id, active, queued in booth_stats
+        )
+        booth_count_text.set_text("\n".join(count_lines))
+        return scat, label, booth_count_text
 
     ani = animation.FuncAnimation(fig, update, frames=len(frames), blit=True)
     ani.save(path, writer=animation.PillowWriter(fps=fps))

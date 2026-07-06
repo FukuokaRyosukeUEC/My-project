@@ -77,23 +77,32 @@ class Config:
     """全設定の一元管理(§26)。YAML から生成し、ワーカーへ pickle 可能。"""
 
     # 空間(§3.3, §4.1)
-    grid_width: int = 40
-    grid_height: int = 30
+    grid_width: int = 20
+    grid_height: int = 16
     cell_size_meters: float = 1.0
     # 時間(§3.1, §3.2)
-    dt_seconds: float = 2.0
-    duration_seconds: float = 3600.0
-    max_speed_mps: float = 1.5
+    dt_seconds: float = 1.0
+    duration_seconds: float = 400.0
+    max_speed_mps: float = 1.0
     # 容量(§4.4)
     cap_default: int = 3
-    cap_queue: int = 2
-    cap_entrance: int = 5
-    cap_exit: int = 5
+    cap_queue: int = 5
+    cap_entrance: int = 10
+    cap_exit: int = 10
     # 入口・出口(§4.5)
-    entrance_clearance: int = 2
+    entrance_clearance: int = 0
+    entrance_side: str = "bottom"
+    exit_side: str = "top"
+    entrance_exit_span: int = 2
+    # ブース周辺形状
+    reception_position: str = "bottom_left"
+    booth_exit_position: str = "top_left"
+    queue_pattern: str = "bottom_then_right"
+    queue_capacity_per_cell: int = 5
+    queue_walkable: bool = False
     # シミュレーション(§2.3, §7, §9.3, §12.2, §17.6)
-    n_visitors: int = 150
-    evaluation_seed: int = 42
+    n_visitors: int = 8000
+    evaluation_seed: int = 0
     safe_occupancy_ratio: float = 0.67
     timeout_seconds: float = 5.0
     replan_interval_steps: int = 10
@@ -109,21 +118,16 @@ class Config:
     w_queue: float = 0.8
     w_crowd: float = 0.6
     # 到着プロファイル(§7): ((start, end, rate), ...)
-    arrival_profile: tuple = (
-        (0.0, 600.0, 1.5),
-        (600.0, 2400.0, 1.0),
-        (2400.0, 3300.0, 0.7),
-        (3300.0, 3600.0, 0.2),
-    )
+    arrival_profile: tuple = ((0.0, 400.0, 1.0),)
     # 制約(§14)
-    min_corridor_width: int = 2
+    min_corridor_width: int = 1
     # 幸福度(§13)
     hap_alpha: float = 0.05
     hap_beta: float = 0.1
     hap_gamma: float = 0.3
     # 最適化(§15)
-    population_size: int = 64
-    n_generations: int = 50
+    population_size: int = 100
+    n_generations: int = 100
     # ブース・プロファイル
     booths: tuple = ()      # tuple[BoothSpec, ...]
     profiles: tuple = ()    # tuple[ProfileSpec, ...]
@@ -147,15 +151,32 @@ class Config:
 
     @property
     def entrance_cells(self) -> tuple[tuple[int, int], ...]:
-        """§4.5: 左辺中央の 3 セル (x=0)。"""
-        mid = self.grid_height // 2
-        return tuple((0, y) for y in (mid - 1, mid, mid + 1))
+        """会場境界の中央に置く入口セル。"""
+        return self._boundary_cells(self.entrance_side)
 
     @property
     def exit_cells(self) -> tuple[tuple[int, int], ...]:
-        """§4.5: 右辺中央の 3 セル (x=W-1)。"""
-        mid = self.grid_height // 2
-        return tuple((self.grid_width - 1, y) for y in (mid - 1, mid, mid + 1))
+        """会場境界の中央に置く出口セル。"""
+        return self._boundary_cells(self.exit_side)
+
+    def _boundary_cells(self, side: str) -> tuple[tuple[int, int], ...]:
+        """指定辺の中央 ``entrance_exit_span`` セルを (x, y) で返す。"""
+        span = self.entrance_exit_span
+        if span < 1:
+            raise ValueError("entrance_exit.span_cells must be at least 1")
+        if side in ("top", "bottom"):
+            if span > self.grid_width:
+                raise ValueError("entrance_exit.span_cells exceeds grid width")
+            start = (self.grid_width - span) // 2
+            y = 0 if side == "top" else self.grid_height - 1
+            return tuple((x, y) for x in range(start, start + span))
+        if side in ("left", "right"):
+            if span > self.grid_height:
+                raise ValueError("entrance_exit.span_cells exceeds grid height")
+            start = (self.grid_height - span) // 2
+            x = 0 if side == "left" else self.grid_width - 1
+            return tuple((x, y) for y in range(start, start + span))
+        raise ValueError(f"unsupported entrance/exit side: {side!r}")
 
     def category_index(self, category: str) -> int:
         return self.categories.index(category)
@@ -202,7 +223,7 @@ def load_config(config_dir: str | Path) -> Config:
             categories.append(b.category)
 
     uw = main["utility_weights"]
-    return Config(
+    cfg = Config(
         grid_width=int(main["grid"]["width"]),
         grid_height=int(main["grid"]["height"]),
         cell_size_meters=float(main["grid"]["cell_size_meters"]),
@@ -214,6 +235,24 @@ def load_config(config_dir: str | Path) -> Config:
         cap_entrance=int(main["capacities"]["entrance"]),
         cap_exit=int(main["capacities"]["exit"]),
         entrance_clearance=int(main["entrance_exit"]["clearance_cells"]),
+        entrance_side=str(main["entrance_exit"].get("entrance_side", "left")),
+        exit_side=str(main["entrance_exit"].get("exit_side", "right")),
+        entrance_exit_span=int(main["entrance_exit"].get("span_cells", 3)),
+        reception_position=str(
+            main.get("booth_geometry", {}).get("reception_position", "bottom_center")
+        ),
+        booth_exit_position=str(
+            main.get("booth_geometry", {}).get("exit_position", "reception")
+        ),
+        queue_pattern=str(
+            main.get("booth_geometry", {}).get("queue_pattern", "straight_down")
+        ),
+        queue_capacity_per_cell=int(
+            main.get("booth_geometry", {}).get("queue_capacity_per_cell", 1)
+        ),
+        queue_walkable=bool(
+            main.get("booth_geometry", {}).get("queue_walkable", True)
+        ),
         n_visitors=int(main["simulation"]["n_visitors"]),
         evaluation_seed=int(main["simulation"]["evaluation_seed"]),
         safe_occupancy_ratio=float(main["simulation"]["safe_occupancy_ratio"]),
@@ -240,6 +279,9 @@ def load_config(config_dir: str | Path) -> Config:
         profiles=profiles,
         categories=tuple(categories),
     )
+    if cfg.queue_capacity_per_cell < 1:
+        raise ValueError("booth_geometry.queue_capacity_per_cell must be at least 1")
+    return cfg
 
 
 # ================================================================ 実行時 dataclass

@@ -23,22 +23,19 @@ from .constraints import compute_violation, round_layout
 from .models import Config
 from .parallel import evaluate_vector
 from .rng import sampling_rng
-from .venue import build_base_venue
+from .venue import build_base_venue, position_bounds
 
 
 def variable_bounds(cfg: Config) -> tuple[np.ndarray, np.ndarray]:
     """§15.2 の上下限。
 
-    x_j ∈ [0, W − w_j]
-    y_j ∈ [0, H − h_j − 1 − max_queue_length_j](受付+行列列を下方向に控除)
+    ブース本体・受付・退出セル・待機列を含む形状全体が会場内に収まる範囲。
     """
     xl, xu = [], []
-    for spec in cfg.booths:
-        xl += [0.0, 0.0]
-        xu += [
-            float(cfg.grid_width - spec.width),
-            float(cfg.grid_height - spec.height - 1 - spec.max_queue_length),
-        ]
+    for booth_id, _spec in enumerate(cfg.booths):
+        xmin, xmax, ymin, ymax = position_bounds(cfg, booth_id)
+        xl += [float(xmin), float(ymin)]
+        xu += [float(xmax), float(ymax)]
     return np.array(xl), np.array(xu)
 
 

@@ -62,13 +62,15 @@ class Simulation:
         visitor_records: tuple,
         collect_heatmap: bool = False,
         record_frames: bool = False,
-        frame_interval: int = 5,
+        frame_interval: int = 1,
     ) -> None:
         self.cfg = cfg
         self.venue = venue
         self.layout = layout
         self.collect_heatmap = collect_heatmap
         self.record_frames = record_frames
+        if frame_interval < 1:
+            raise ValueError("frame_interval must be at least 1")
         self.frame_interval = frame_interval
 
         H, W = cfg.grid_height, cfg.grid_width
@@ -189,7 +191,8 @@ class Simulation:
     def _booth_step(self, t: int) -> None:
         for rt in self.booths:
             spec = self.cfg.booths[rt.booth_id]
-            rx, ry = self.layout.receptions[rt.booth_id]
+            ex, ey = self.layout.booth_exits[rt.booth_id]
+            separate_exit = self.layout.booth_exits[rt.booth_id] != self.layout.receptions[rt.booth_id]
 
             # 体験完了 → 退出待ち(入場順=挿入順で決定的)
             done = [vid for vid, end in rt.active_users.items() if end <= t]
@@ -198,17 +201,17 @@ class Simulation:
                 rt.exit_waiting.append(vid)
 
             # 受付セルへ再出現(§11.4)。空きがなければブース内で待機
-            while rt.exit_waiting and self.occupancy[ry, rx] < self.capacity[ry, rx]:
+            while rt.exit_waiting and self.occupancy[ey, ex] < self.capacity[ey, ex]:
                 vid = rt.exit_waiting.popleft()
                 v = self._visitor(vid)
-                self.occupancy[ry, rx] += 1
-                v.position = (rx, ry)
+                self.occupancy[ey, ex] += 1
+                v.position = (ex, ey)
                 v.visited_booths.add(rt.booth_id)
                 v.state = CHOOSING  # max_visit 超過時は意思決定で EXITING へ(§6.2)
 
             # 退出待ちがいない場合のみキュー先頭を入場(§11.4)
             while (
-                not rt.exit_waiting
+                (separate_exit or not rt.exit_waiting)
                 and len(rt.active_users) < spec.capacity
                 and rt.queue
             ):
@@ -224,9 +227,10 @@ class Simulation:
     def _shift_queue(self, rt: BoothRuntime) -> None:
         """待機者を先頭(受付側)から詰め直す(§5.2)。"""
         cells = self.layout.queue_cells[rt.booth_id]
+        per_cell = self.cfg.queue_capacity_per_cell
         for slot, vid in enumerate(rt.queue):
             v = self._visitor(vid)
-            new_cell = cells[slot]
+            new_cell = cells[slot // per_cell]
             if v.position != new_cell:
                 ox, oy = v.position
                 nx, ny = new_cell
@@ -500,9 +504,12 @@ class Simulation:
         spec = cfg.booths[b]
         rt = self.booths[b]
         rx, ry = self.layout.receptions[b]
+        separate_exit = self.layout.booth_exits[b] != self.layout.receptions[b]
 
         can_enter = (
-            not rt.exit_waiting and len(rt.active_users) < spec.capacity and not rt.queue
+            (separate_exit or not rt.exit_waiting)
+            and len(rt.active_users) < spec.capacity
+            and not rt.queue
         )
         if can_enter:
             self.occupancy[ry, rx] -= 1
@@ -514,14 +521,15 @@ class Simulation:
         # 行列参加判定(§11.3): 満杯 or 残り時間不足なら諦め
         est_wait = len(rt.queue) * spec.mean_service_seconds / spec.capacity
         remaining = (cfg.n_steps - t) * cfg.dt_seconds
-        if len(rt.queue) >= spec.max_queue_length or remaining < est_wait + spec.mean_service_seconds:
+        queue_capacity = len(self.layout.queue_cells[b]) * cfg.queue_capacity_per_cell
+        if len(rt.queue) >= queue_capacity or remaining < est_wait + spec.mean_service_seconds:
             v.give_up_count += 1
             v.given_up_booths.add(b)
             v.state = CHOOSING
             return
 
         slot = len(rt.queue)
-        qx, qy = self.layout.queue_cells[b][slot]
+        qx, qy = self.layout.queue_cells[b][slot // cfg.queue_capacity_per_cell]
         self.occupancy[ry, rx] -= 1
         self.occupancy[qy, qx] += 1  # 待機者は実セルを占有(§5.2)
         v.position = (qx, qy)
@@ -547,11 +555,22 @@ class Simulation:
 
     def _capture_frame(self, t: int) -> None:
         snap = [
-            (v.visitor_id, v.position[0], v.position[1], v.state, v.target_booth_id)
+            (
+                v.visitor_id,
+                v.position[0],
+                v.position[1],
+                v.state,
+                v.target_booth_id,
+                v.blocked_count,
+            )
             for v in self.visitors
             if v.position is not None
         ]
-        self.frames.append((t, snap))
+        booth_stats = tuple(
+            (rt.booth_id, len(rt.active_users), len(rt.queue))
+            for rt in self.booths
+        )
+        self.frames.append((t, snap, booth_stats))
 
     # ------------------------------------------------------------ 終了処理
     def _finalize(self, timed_out: bool) -> SimResult:

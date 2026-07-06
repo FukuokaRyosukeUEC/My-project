@@ -62,6 +62,7 @@ def evaluate_layout(
     positions: tuple,
     collect_heatmap: bool = False,
     record_frames: bool = False,
+    frame_interval: int = 1,
 ) -> SimResult:
     """有効配置を 1 回シミュレーションする(§2.3: 1 配置 1 シミュレーション)。"""
     layout = apply_layout(ctx.cfg, ctx.venue, positions)
@@ -72,6 +73,7 @@ def evaluate_layout(
         ctx.visitor_records,
         collect_heatmap=collect_heatmap,
         record_frames=record_frames,
+        frame_interval=frame_interval,
     )
     return sim.run()
 
