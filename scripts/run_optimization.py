@@ -24,15 +24,19 @@ from src.constraints import round_layout  # noqa: E402
 from src.models import load_config  # noqa: E402
 from src.optimization import (  # noqa: E402
     run_nsga2,
+    sample_valid_layout,
     save_results,
     select_representatives,
+    variable_bounds,
 )
+from src.rng import sampling_rng
 from src.parallel import build_context, default_workers, evaluate_layout, init_worker  # noqa: E402
 from src.venue import apply_layout  # noqa: E402
 from src.visualization import (  # noqa: E402
     comparison_table,
     plot_heatmaps,
     plot_pareto_front,
+    plot_time_series_comparison,
 )
 
 
@@ -75,15 +79,61 @@ def main() -> None:
     ctx = build_context(cfg)
     jp = {"best_movement": "移動重視", "knee": "バランス", "best_congestion": "混雑重視"}
     table_src = {}
+    representative_results = {}
     for name in ("best_movement", "knee", "best_congestion"):
         positions = tuple(tuple(p) for p in rep_layouts[name]["positions"])
         r = evaluate_layout(ctx, positions, collect_heatmap=True)
+        representative_results[name] = r
         layout = apply_layout(cfg, ctx.venue, positions)
         plot_heatmaps(
             cfg, layout, r.heatmap, r.over_threshold_map,
             out / f"heatmap_{name}.png", title=jp[name],
         )
         table_src[jp[name]] = {**r.kpis, "f_congestion": r.f_congestion}
+        
+    # =============================================================
+    # 以下は，初期解と選択済み最適解の時系列比較
+    # =============================================================
+    # NSGA-IIの初期集団生成と同じ変数範囲
+    lower_bounds, upper_bounds = variable_bounds(cfg)
+
+    # ValidLayoutSamplingと同じ乱数系列を使用する。
+    # これにより初期集団の第1有効配置を再現する。
+    initial_x = sample_valid_layout(
+        sampling_rng(cfg.evaluation_seed),
+        lower_bounds,
+        upper_bounds,
+        cfg,
+        ctx.venue,
+    )
+
+    # 実数ベクトルを整数のブース座標へ変換
+    initial_positions = round_layout(initial_x)
+
+    # 初期解をシミュレーション
+    initial_result = evaluate_layout(
+        ctx,
+        initial_positions,
+    )
+
+    # -------------------------------------------------------------
+    # 比較対象とする選択済み最適解
+    # -------------------------------------------------------------
+    # 選択肢：
+    #   "best_movement"   : 移動重視解
+    #   "knee"            : バランス解
+    #   "best_congestion" : 混雑重視解
+    selected_name = "knee"
+
+    selected_result = representative_results[selected_name]
+
+    # 2種類の時系列グラフを保存
+    plot_time_series_comparison(
+        initial_result=initial_result,
+        representative_results=representative_results,
+        congestion_path=out / "congestion_over_time.png",
+        movement_path=out / "movement_burden_over_time.png",
+    )
     table = comparison_table(table_src, out / "comparison_table.csv")
     print("\n=== 代表 3 案の比較(§20.3) ===")
     print(table.to_string())

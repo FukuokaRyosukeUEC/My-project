@@ -49,6 +49,11 @@ class SimResult:
     heatmap: np.ndarray | None = None            # 累積滞在人数
     over_threshold_map: np.ndarray | None = None  # 混雑閾値超過時間(秒)
     frames: list = field(default_factory=list)    # 可視化用スナップショット
+    
+    # 以下は，混雑度と移動距離の推移をプロットするための履歴データ
+    time_steps: list[int] = field(default_factory=list)
+    congestion_history: list[float] = field(default_factory=list)
+    movement_history: list[float] = field(default_factory=list)
 
 
 class Simulation:
@@ -109,6 +114,9 @@ class Simulation:
         self.heatmap = np.zeros((H, W), dtype=np.int64) if collect_heatmap else None
         self.over_map = np.zeros((H, W), dtype=np.float64) if collect_heatmap else None
         self.frames: list = []
+        self.time_steps: list[int] = [] # 時系列グラフ用
+        self.congestion_history: list[float] = [] # 時系列グラフ用
+        self.movement_history: list[float] = [] # 時系列グラフ用
         self.experiences_completed = 0
 
     def _visitor(self, vid: int):
@@ -540,19 +548,80 @@ class Simulation:
     # ------------------------------------------------------------ 6. 集計(§12.2)
     def _metrics_step(self, t: int) -> None:
         cfg = self.cfg
+
         occ = self.occupancy[self.walkable].astype(np.float64)
         cap = self.capacity[self.walkable].astype(np.float64)
-        excess = np.maximum(0.0, occ / cap - cfg.safe_occupancy_ratio)
-        self.congestion_sum += float(np.sum(excess * excess))
+
+        # ---------------------------------------------------------
+        # 1. タイムステップ t における混雑度
+        # ---------------------------------------------------------
+        excess = np.maximum(
+            0.0,
+            occ / cap - cfg.safe_occupancy_ratio,
+        )
+
+        step_congestion_sum = float(np.sum(excess * excess))
+
+        # 通行可能セル数で正規化した、その時点の混雑度
+        if self.n_walkable > 0:
+            step_congestion = step_congestion_sum / self.n_walkable
+        else:
+            step_congestion = 0.0
+
+        # 最終目的関数計算用の累積値
+        self.congestion_sum += step_congestion_sum
+
+        # ---------------------------------------------------------
+        # 2. タイムステップ t までの移動負担
+        # ---------------------------------------------------------
+        spawned = [
+            v for v in self.visitors
+            if v.state != NOT_ARRIVED
+        ]
+
+        if spawned:
+            movement_burden = float(
+                np.mean([
+                    v.moved_cells
+                    * cfg.cell_size_meters
+                    / v.speed_mps
+                    for v in spawned
+                ])
+            )
+        else:
+            movement_burden = 0.0
+
+        # ---------------------------------------------------------
+        # 3. 時系列として保存
+        # ---------------------------------------------------------
+        self.time_steps.append(t)
+        self.congestion_history.append(step_congestion)
+        self.movement_history.append(movement_burden)
+
+        # ---------------------------------------------------------
+        # 既存のKPI集計
+        # ---------------------------------------------------------
         if occ.size:
-            self.max_occ_ratio = max(self.max_occ_ratio, float(np.max(occ / cap)))
+            self.max_occ_ratio = max(
+                self.max_occ_ratio,
+                float(np.max(occ / cap)),
+            )
+
         if self.collect_heatmap:
             self.heatmap += self.occupancy
-            over = np.maximum(
-                0.0, self.occupancy / np.maximum(self.capacity, 1) - cfg.safe_occupancy_ratio
-            )
-            self.over_map += (over > 0) * cfg.dt_seconds * self.walkable
 
+            over = np.maximum(
+                0.0,
+                self.occupancy / np.maximum(self.capacity, 1)
+                - cfg.safe_occupancy_ratio,
+            )
+
+            self.over_map += (
+                (over > 0)
+                * cfg.dt_seconds
+                * self.walkable
+            )
+        
     def _capture_frame(self, t: int) -> None:
         snap = [
             (
@@ -574,9 +643,38 @@ class Simulation:
 
     # ------------------------------------------------------------ 終了処理
     def _finalize(self, timed_out: bool) -> SimResult:
-        from .metrics import compute_metrics  # 循環回避のため遅延 import
+        from .metrics import compute_metrics
+
+        # 正常に早期終了した場合は、残り時間を補完する。
+        #
+        # 来場者が全員退出した後なので、
+        #   混雑度   = 0
+        #   移動負担 = 最終値のまま
+        #
+        # とする。
+        if not timed_out and len(self.time_steps) < self.cfg.n_steps:
+            start = len(self.time_steps)
+            remaining = self.cfg.n_steps - start
+
+            if self.movement_history:
+                last_movement = self.movement_history[-1]
+            else:
+                last_movement = 0.0
+
+            self.time_steps.extend(
+                range(start, self.cfg.n_steps)
+            )
+
+            self.congestion_history.extend(
+                [0.0] * remaining
+            )
+
+            self.movement_history.extend(
+                [last_movement] * remaining
+            )
 
         f_move, f_cong, kpis = compute_metrics(self)
+
         return SimResult(
             f_move=f_move,
             f_congestion=f_cong,
@@ -585,4 +683,9 @@ class Simulation:
             heatmap=self.heatmap,
             over_threshold_map=self.over_map,
             frames=self.frames,
+
+            # 追加
+            time_steps=self.time_steps,
+            congestion_history=self.congestion_history,
+            movement_history=self.movement_history,
         )
