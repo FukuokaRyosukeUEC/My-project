@@ -103,6 +103,75 @@ def plot_pareto_front(F: np.ndarray, reps: dict[str, int], path: str | Path) -> 
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
+    
+def plot_time_series_comparison(
+    initial_result,
+    representative_results: dict,
+    congestion_path: str | Path,
+    movement_path: str | Path,
+) -> None:
+    """
+    初期解と代表3解について、1パネルのグラフを2ファイル保存する。
+
+    congestion_path:
+        タイムステップ－混雑度
+
+    movement_path:
+        タイムステップ－移動負担
+    """
+
+    series = [
+        ("初期解", initial_result),
+        ("移動重視解", representative_results["best_movement"]),
+        ("バランス解", representative_results["knee"]),
+        ("混雑重視解", representative_results["best_congestion"]),
+    ]
+
+    # =========================================================
+    # 混雑度
+    # =========================================================
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    for label, result in series:
+        ax.plot(
+            result.time_steps,
+            result.congestion_history,
+            linewidth=1.8,
+            label=label,
+        )
+
+    ax.set_xlabel("タイムステップ")
+    ax.set_ylabel("混雑度")
+    ax.set_title("タイムステップごとの混雑度")
+    ax.grid(alpha=0.3)
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(congestion_path, dpi=150)
+    plt.close(fig)
+
+    # =========================================================
+    # 移動負担
+    # =========================================================
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    for label, result in series:
+        ax.plot(
+            result.time_steps,
+            result.movement_history,
+            linewidth=1.8,
+            label=label,
+        )
+
+    ax.set_xlabel("タイムステップ")
+    ax.set_ylabel("移動負担 [s/人]")
+    ax.set_title("タイムステップごとの移動負担")
+    ax.grid(alpha=0.3)
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(movement_path, dpi=150)
+    plt.close(fig)
 
 
 def plot_heatmaps(cfg: Config, layout: Layout, heatmap, over_map, path: str | Path, title="") -> None:
