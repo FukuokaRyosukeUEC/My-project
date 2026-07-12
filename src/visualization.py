@@ -87,19 +87,146 @@ def draw_venue(ax, cfg: Config, layout: Layout) -> None:
     ax.set_yticks([])
 
 
-def plot_pareto_front(F: np.ndarray, reps: dict[str, int], path: str | Path) -> None:
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.scatter(F[:, 0], F[:, 1], c="tab:blue", s=25, label="Pareto solutions")
-    marks = {"best_movement": ("s", "tab:green", "min f_move"),
-             "best_congestion": ("^", "tab:red", "min f_congestion"),
-             "knee": ("*", "tab:orange", "balance (knee)")}
+def plot_pareto_front(
+    F: np.ndarray,
+    reps: dict[str, int],
+    path: str | Path,
+    initial_f: np.ndarray | None = None,
+) -> None:
+    """
+    最終パレート解、代表解、および比較用の初期解を描画する。
+
+    Parameters
+    ----------
+    F
+        最終パレート解の目的関数値。
+        各行は [f_move, f_congestion]。
+    reps
+        代表解名とF内のインデックスの対応。
+    path
+        グラフの保存先。
+    initial_f
+        初期解の目的関数値 [f_move, f_congestion]。
+        Noneの場合は初期解を描画しない。
+    """
+    F = np.atleast_2d(np.asarray(F, dtype=float))
+
+    fig, ax = plt.subplots(figsize=(7, 5.5))
+
+    # ---------------------------------------------------------
+    # 最終パレート解
+    # ---------------------------------------------------------
+    ax.scatter(
+        F[:, 0],
+        F[:, 1],
+        c="tab:blue",
+        s=30,
+        alpha=0.75,
+        label="Pareto solutions",
+        zorder=2,
+    )
+
+    # ---------------------------------------------------------
+    # 代表解
+    # ---------------------------------------------------------
+    marks = {
+        "best_movement": (
+            "s",
+            "tab:green",
+            "Movement-oriented solution",
+        ),
+        "best_congestion": (
+            "^",
+            "tab:red",
+            "Congestion-oriented solution",
+        ),
+        "knee": (
+            "*",
+            "tab:orange",
+            "Balanced solution (knee)",
+        ),
+    }
+
     for name, idx in reps.items():
-        m, c, lb = marks[name]
-        ax.scatter(F[idx, 0], F[idx, 1], marker=m, c=c, s=120, label=lb, zorder=3)
+        if name not in marks:
+            continue
+
+        marker, color, label = marks[name]
+
+        ax.scatter(
+            F[idx, 0],
+            F[idx, 1],
+            marker=marker,
+            c=color,
+            s=150,
+            edgecolors="black",
+            linewidths=0.8,
+            label=label,
+            zorder=4,
+        )
+
+    # ---------------------------------------------------------
+    # 比較に使用した初期解
+    # ---------------------------------------------------------
+    if initial_f is not None:
+        initial_f = np.asarray(initial_f, dtype=float).reshape(-1)
+
+        if initial_f.size != 2:
+            raise ValueError(
+                "initial_f must contain exactly two values: "
+                "[f_move, f_congestion]."
+            )
+
+        if not np.all(np.isfinite(initial_f)):
+            raise ValueError(
+                f"initial_f contains non-finite values: {initial_f}"
+            )
+
+        ax.scatter(
+            initial_f[0],
+            initial_f[1],
+            marker="D",
+            c="black",
+            s=110,
+            edgecolors="white",
+            linewidths=1.0,
+            label="Initial solution",
+            zorder=5,
+        )
+
+        ax.annotate(
+            "Initial",
+            xy=(initial_f[0], initial_f[1]),
+            xytext=(8, 8),
+            textcoords="offset points",
+            fontsize=9,
+            fontweight="bold",
+            zorder=6,
+        )
+
     ax.set_xlabel("f_move: mean free-walk time [s]")
     ax.set_ylabel("f_congestion")
+    ax.set_title("Pareto front and initial solution")
+
+    # どちらも最小化目的であることを明示
+    ax.text(
+        0.02,
+        0.98,
+        "Lower-left is better",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=9,
+        bbox={
+            "boxstyle": "round",
+            "facecolor": "white",
+            "alpha": 0.8,
+        },
+    )
+
     ax.legend()
     ax.grid(alpha=0.3)
+
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

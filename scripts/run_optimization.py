@@ -68,8 +68,7 @@ def main() -> None:
     rep_layouts = save_results(cfg, res, out)
     F = np.atleast_2d(res.F)
     reps = select_representatives(F)
-    plot_pareto_front(F, reps, out / "pareto_front.png")
-
+    
     # 最適化ログ(世代別の目的値集計は verbose 出力に委ね、最終集団を保存)
     pd.DataFrame(F, columns=["f_move", "f_congestion"]).to_csv(
         out / "optimization_log.csv", index_label="pareto_index"
@@ -114,6 +113,31 @@ def main() -> None:
     initial_result = evaluate_layout(
         ctx,
         initial_positions,
+    )
+    
+    # -------------------------------------------------------------
+    # 初期解の目的関数値
+    # -------------------------------------------------------------
+    initial_f = np.array(
+        [
+            initial_result.f_move,
+            initial_result.f_congestion,
+        ],
+        dtype=float,
+    )
+
+    print("\n=== パレートフロント比較用の初期解 ===")
+    print(f"f_move       = {initial_f[0]:.6f}")
+    print(f"f_congestion = {initial_f[1]:.6e}")
+
+    # -------------------------------------------------------------
+    # パレート解・代表解・初期解を同じグラフに表示
+    # -------------------------------------------------------------
+    plot_pareto_front(
+        F=F,
+        reps=reps,
+        path=out / "pareto_front.png",
+        initial_f=initial_f,
     )
 
     # -------------------------------------------------------------
