@@ -6,7 +6,7 @@ grid:
 
 time:
   dt_seconds: 1.0
-  duration_seconds: 400      # simulate_result.py の SPEC_DEFAULTS.T
+  duration_seconds: 540      # simulate_result.py の SPEC_DEFAULTS.T
   max_speed_mps: 1.0
 
 capacities:
@@ -29,26 +29,30 @@ booth_geometry:
   queue_walkable: false
 
 simulation:
-  n_visitors: 200           # 20 人/step × 400 step
+  n_visitors: 400          # 20 人/step × 400 step
   evaluation_seed: 0
   safe_occupancy_ratio: 0.67 # §12.2
   timeout_seconds: 5.0       # §17.6
   replan_interval_steps: 10  # §9.3
   blocked_replan_count: 3    # §9.3
-  softmax_temperature: 0.3   # §8
+  softmax_temperature: 0.45   # §8
   q_norm_seconds: 600.0      # §8 Q_norm
-  giveup_utility_penalty: 0.5   # §8 諦めブースへの減点
+  giveup_utility_penalty: 1.0   # §8 諦めブースへの減点
   utility_min_threshold: 0.0    # §8 全候補がこの値未満なら EXITING
 
 utility_weights:             # §8 既定重み
   interest: 1.0
-  attract: 0.5
-  distance: 1.0
-  queue: 0.8
-  crowd: 0.6
+  attract: 0.7
+  distance: 0.70
+  queue: 1.0
+  crowd: 1.15
 
 arrival_profile:             # 400 秒間に 400 人 = 平均 1 人/step
-  - [0, 400, 1.0]
+  - [0, 60, 1.6]      # 9:00-10:00 入場直後ピーク
+  - [60, 180, 1.1]    # 10:00-12:00 午前
+  - [180, 300, 0.8]   # 12:00-14:00 昼でやや低下
+  - [300, 450, 1.2]   # 14:00-16:30 午後ピーク
+  - [450, 540, 0.4]   # 16:30-18:00 終盤
 
 constraints:
   min_corridor_width: 1      # 20260629 には最低通路幅の追加制約なし
