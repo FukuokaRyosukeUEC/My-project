@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from pymoo.core.problem import StarmapParallelization  # noqa: E402
 
-from src.constraints import round_layout  # noqa: E402
+from src.constraints import to_integer_layout  # noqa: E402
 from src.models import load_config  # noqa: E402
 from src.optimization import (  # noqa: E402
     run_nsga2,
@@ -106,8 +106,9 @@ def main() -> None:
         ctx.venue,
     )
 
-    # 実数ベクトルを整数のブース座標へ変換
-    initial_positions = round_layout(initial_x)
+    # sample_valid_layout が返す初期個体は既に整数ベクトル。
+    # シミュレーション用の配置タプルへ変換する。
+    initial_positions = to_integer_layout(initial_x)
 
     # 初期解をシミュレーション
     initial_result = evaluate_layout(
