@@ -1,6 +1,6 @@
 """optimization.py — pymoo Problem・NSGA-II・代表解抽出(§15, §19)。
 
-- 実数変数 + 評価時丸め方式(§15.2)
+- 離散変数 + 評価時丸め方式(§15.2)
 - 制約は単一の違反量 g(n_ieq_constr = 1)
 - 初期集団はリジェクションサンプリングで有効配置のみ生成(§15.3)
 - 交叉 SBX(eta=15)、突然変異 PM(eta=20)は pymoo 既定
@@ -17,26 +17,40 @@ from pymoo.core.problem import ElementwiseProblem
 from pymoo.core.sampling import Sampling
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
+from pymoo.operators.repair.rounding import RoundingRepair
 from pymoo.optimize import minimize
 
-from .constraints import compute_violation, round_layout
+from .constraints import compute_violation, to_integer_layout
 from .models import Config
 from .parallel import evaluate_vector
 from .rng import sampling_rng
 from .venue import build_base_venue, position_bounds
 
 
-def variable_bounds(cfg: Config) -> tuple[np.ndarray, np.ndarray]:
-    """§15.2 の上下限。
+def variable_bounds(
+    cfg: Config,
+) -> tuple[np.ndarray, np.ndarray]:
+    """ブース座標の整数上下限を返す。
 
-    ブース本体・受付・退出セル・待機列を含む形状全体が会場内に収まる範囲。
+    ブース本体・受付・退出セル・待機列を含む形状全体が
+    会場内に収まる範囲を使用する。
     """
-    xl, xu = [], []
+    xl = []
+    xu = []
+
     for booth_id, _spec in enumerate(cfg.booths):
-        xmin, xmax, ymin, ymax = position_bounds(cfg, booth_id)
-        xl += [float(xmin), float(ymin)]
-        xu += [float(xmax), float(ymax)]
-    return np.array(xl), np.array(xu)
+        xmin, xmax, ymin, ymax = position_bounds(
+            cfg,
+            booth_id,
+        )
+
+        xl += [xmin, ymin]
+        xu += [xmax, ymax]
+
+    return (
+        np.asarray(xl, dtype=np.int64),
+        np.asarray(xu, dtype=np.int64),
+    )
 
 
 class LayoutProblem(ElementwiseProblem):
@@ -45,12 +59,14 @@ class LayoutProblem(ElementwiseProblem):
     def __init__(self, cfg: Config, **kwargs) -> None:
         self.cfg = cfg
         xl, xu = variable_bounds(cfg)
+
         super().__init__(
             n_var=len(cfg.booths) * 2,
             n_obj=2,
             n_ieq_constr=1,
             xl=xl,
             xu=xu,
+            vtype=int,
             **kwargs,
         )
 
@@ -73,20 +89,68 @@ class ValidLayoutSampling(Sampling):
         cfg = self.cfg
         venue = build_base_venue(cfg)
         rng = sampling_rng(cfg.evaluation_seed)
-        lower, upper = problem.xl, problem.xu
-        out = np.empty((n_samples, problem.n_var))
+
+        lower = problem.xl
+        upper = problem.xu
+
+        out = np.empty(
+            (n_samples, problem.n_var),
+            dtype=np.int64,
+        )
+
         for i in range(n_samples):
-            out[i] = sample_valid_layout(rng, lower, upper, cfg, venue, self.max_trials)
+            out[i] = sample_valid_layout(
+                rng,
+                lower,
+                upper,
+                cfg,
+                venue,
+                self.max_trials,
+            )
+
         return out
 
 
-def sample_valid_layout(rng, lower_bounds, upper_bounds, cfg, venue, max_trials=1000):
-    """§15.3 のリジェクションサンプリング(1 個体)。"""
+def sample_valid_layout(
+    rng,
+    lower_bounds,
+    upper_bounds,
+    cfg,
+    venue,
+    max_trials=1000,
+):
+    """整数の有効配置をリジェクションサンプリングする。"""
+    lower = np.asarray(
+        lower_bounds,
+        dtype=np.int64,
+    )
+    upper = np.asarray(
+        upper_bounds,
+        dtype=np.int64,
+    )
+
     for _ in range(max_trials):
-        layout = rng.uniform(lower_bounds, upper_bounds)
-        if compute_violation(cfg, venue, round_layout(layout)) == 0:
+        # rng.integers の上限は排他的であるため、
+        # upper + 1 として上下限を両方含める。
+        layout = rng.integers(
+            low=lower,
+            high=upper + 1,
+            dtype=np.int64,
+        )
+
+        positions = to_integer_layout(layout)
+
+        if compute_violation(
+            cfg,
+            venue,
+            positions,
+        ) == 0:
             return layout
-    raise RuntimeError("有効配置を生成できません。会場が狭すぎる可能性があります。")
+
+    raise RuntimeError(
+        "有効配置を生成できません。"
+        "会場が狭すぎる可能性があります。"
+    )
 
 
 def run_nsga2(
@@ -105,8 +169,24 @@ def run_nsga2(
     algorithm = NSGA2(
         pop_size=pop_size or cfg.population_size,
         sampling=ValidLayoutSampling(cfg),
-        crossover=SBX(eta=15, prob=0.9),
-        mutation=PM(eta=20),
+
+        # SBX自体の計算は実数空間で行い、
+        # 生成直後に整数へ修復する。
+        crossover=SBX(
+            eta=15,
+            prob=0.9,
+            vtype=float,
+            repair=RoundingRepair(),
+        ),
+
+        # Polynomial Mutationも生成直後に整数へ修復する。
+        mutation=PM(
+            eta=20,
+            vtype=float,
+            repair=RoundingRepair(),
+        ),
+
+        # 整数化後に同じ設計ベクトルとなった個体を除去する。
         eliminate_duplicates=True,
     )
     return minimize(
@@ -137,16 +217,22 @@ def save_results(cfg: Config, res, out_dir: str | Path) -> dict:
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    X = np.atleast_2d(res.X)
+    X = np.asarray(
+        np.atleast_2d(res.X),
+        dtype=np.int64,
+    )
     F = np.atleast_2d(res.F)
 
     # パレート解ごとに KPI を再取得(有効解のみが res に残る)
     ctx = build_context(cfg)
     rows = []
     for x, f in zip(X, F):
-        positions = round_layout(x)
+        positions = to_integer_layout(x)
         r = evaluate_layout(ctx, positions)
-        row = {f"x{j}": float(v) for j, v in enumerate(x)}
+        row = {
+            f"x{j}": int(v)
+            for j, v in enumerate(x)
+        }
         row.update(
             f_move=f[0],
             f_congestion=f[1],
@@ -169,8 +255,14 @@ def save_results(cfg: Config, res, out_dir: str | Path) -> dict:
     rep_layouts = {}
     for name, idx in reps.items():
         payload = {
-            "design_vector": [float(v) for v in X[idx]],
-            "positions": [list(p) for p in round_layout(X[idx])],
+            "design_vector": [
+                int(v)
+                for v in X[idx]
+            ],
+            "positions": [
+                list(p)
+                for p in to_integer_layout(X[idx])
+            ],
             "f_move": float(F[idx, 0]),
             "f_congestion": float(F[idx, 1]),
         }

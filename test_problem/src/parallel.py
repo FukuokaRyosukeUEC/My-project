@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .constraints import compute_violation, round_layout
+from .constraints import compute_violation, to_integer_layout
 from .models import Config
 from .simulator import SimResult, Simulation
 from .venue import Venue, apply_layout, build_base_venue
@@ -78,21 +78,53 @@ def evaluate_layout(
     return sim.run()
 
 
-def evaluate_vector(x: np.ndarray, cfg: Config) -> tuple[float, float, float, dict]:
-    """最適化から呼ばれる評価: (f_move, f_congestion, g, kpis) を返す。
+def evaluate_vector(
+    x: np.ndarray,
+    cfg: Config,
+) -> tuple[float, float, float, dict]:
+    """整数の配置ベクトルを評価する。
 
-    g > 0(制約違反)の配置はシミュレーションせず即返却する(§14)。
-    タイムアウト時はペナルティ値を与える(§17.6)。
+    g > 0 の配置はシミュレーションを実行せず、
+    ペナルティ目的関数値を返す。
     """
     ctx = get_context(cfg)
-    positions = round_layout(x)
-    g = compute_violation(cfg, ctx.venue, positions)
+
+    # 小数を暗黙に丸めず、整数であることを検証する。
+    positions = to_integer_layout(x)
+
+    g = compute_violation(
+        cfg,
+        ctx.venue,
+        positions,
+    )
+
     if g > 0:
-        return PENALTY_OBJECTIVE, PENALTY_OBJECTIVE, g, {}
-    res = evaluate_layout(ctx, positions)
+        return (
+            PENALTY_OBJECTIVE,
+            PENALTY_OBJECTIVE,
+            g,
+            {},
+        )
+
+    res = evaluate_layout(
+        ctx,
+        positions,
+    )
+
     if res.timed_out:
-        return PENALTY_OBJECTIVE, PENALTY_OBJECTIVE, 0.0, res.kpis
-    return res.f_move, res.f_congestion, 0.0, res.kpis
+        return (
+            PENALTY_OBJECTIVE,
+            PENALTY_OBJECTIVE,
+            0.0,
+            res.kpis,
+        )
+
+    return (
+        res.f_move,
+        res.f_congestion,
+        0.0,
+        res.kpis,
+    )
 
 
 def default_workers() -> int:
