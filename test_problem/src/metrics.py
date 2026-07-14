@@ -56,11 +56,18 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
     hap = np.array([happiness(v, cfg) for v in spawned]) if n_spawned else np.array([0.0])
     finished = sum(1 for v in spawned if v.state == FINISHED)
 
-    # --- 目的関数 2: 混雑度 + ブロック待機ペナルティ
-    f_congestion_raw = sim.congestion_sum / (cfg.n_steps * sim.n_walkable)
+    # --- 目的関数 2: ブース周辺重み付き混雑度 + ブロック待機ペナルティ
+    denom_raw = max(1.0, float(cfg.n_steps * sim.n_walkable))
+    f_congestion_raw = sim.congestion_sum / denom_raw
+
+    weight_sum = float(getattr(sim, "congestion_weight_sum", sim.n_walkable))
+    denom_weighted = max(1.0, float(cfg.n_steps) * weight_sum)
+    f_congestion_weighted = getattr(sim, "weighted_congestion_sum", sim.congestion_sum) / denom_weighted
+
     mean_blocked_seconds = float(blocked.mean())
     blocked_weight = 0.00005
-    f_congestion = f_congestion_raw + blocked_weight * mean_blocked_seconds
+    f_congestion = f_congestion_weighted 
+    #+ blocked_weight * mean_blocked_seconds
 
     kpis = {
         "n_spawned": n_spawned,
@@ -72,9 +79,13 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
         "mean_entry_delay_seconds": float(delays.mean()),
         "max_cell_occupancy_ratio": float(sim.max_occ_ratio),
         "congestion_sum": float(sim.congestion_sum),
+        "weighted_congestion_sum": float(getattr(sim, "weighted_congestion_sum", sim.congestion_sum)),
+        "congestion_weight_sum": float(getattr(sim, "congestion_weight_sum", sim.n_walkable)),
 
         # 追加しておくと比較しやすい
         "f_congestion_raw": float(f_congestion_raw),
+        "f_congestion_weighted": float(f_congestion_weighted),
+        "blocked_congestion_weight": float(blocked_weight),
         "f_congestion_with_blocked": float(f_congestion),
 
         "mean_booths_experienced": float(n_exp.mean()),
