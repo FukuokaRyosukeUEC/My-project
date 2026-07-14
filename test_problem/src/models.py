@@ -107,6 +107,7 @@ class Config:
     timeout_seconds: float = 5.0
     replan_interval_steps: int = 10
     blocked_replan_count: int = 3
+    blocked_congestion_weight: float = 0.00005
     # 効用(§8)
     softmax_temperature: float = 0.3
     q_norm_seconds: float = 600.0
@@ -259,6 +260,7 @@ def load_config(config_dir: str | Path) -> Config:
         timeout_seconds=float(main["simulation"]["timeout_seconds"]),
         replan_interval_steps=int(main["simulation"]["replan_interval_steps"]),
         blocked_replan_count=int(main["simulation"]["blocked_replan_count"]),
+        blocked_congestion_weight=float(main["simulation"].get("blocked_congestion_weight", 0.00005)),
         softmax_temperature=float(main["simulation"]["softmax_temperature"]),
         q_norm_seconds=float(main["simulation"]["q_norm_seconds"]),
         giveup_utility_penalty=float(main["simulation"]["giveup_utility_penalty"]),
