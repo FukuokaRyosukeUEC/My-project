@@ -13,10 +13,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.core.mutation import Mutation
 from pymoo.core.problem import ElementwiseProblem
 from pymoo.core.sampling import Sampling
 from pymoo.operators.crossover.sbx import SBX
-from pymoo.operators.mutation.pm import PM
 from pymoo.operators.repair.rounding import RoundingRepair
 from pymoo.optimize import minimize
 
@@ -153,6 +153,180 @@ def sample_valid_layout(
     )
 
 
+class RandomValidBoothMutation(Mutation):
+    """1個のブースだけを、制約を満たす別位置へランダム移動する突然変異。
+
+    各個体について確率 ``prob`` で突然変異を行う。
+
+    突然変異を行う場合はブースを1個ランダムに選び、
+    そのブースだけを compute_violation(...) == 0 となる
+    別座標へ移動する。
+
+    選択したブースに有効な別位置が存在しない場合は、
+    元の個体を保持する。
+    """
+
+    def __init__(
+        self,
+        cfg: Config,
+        prob: float = 0.2,
+        seed: int = 1,
+    ) -> None:
+        # pymooのMutation基底クラスは、_doを全個体に適用した後で
+        # 個体単位の突然変異確率を適用する。
+        #
+        # 今回は制約判定の計算を突然変異対象の個体だけに限定するため、
+        # 基底クラス側の確率を1.0にし、
+        # このクラス内で確率判定を行う。
+        super().__init__(prob=1.0)
+
+        if not 0.0 <= prob <= 1.0:
+            raise ValueError(
+                f"mutation probability must be in [0, 1]: {prob}"
+            )
+
+        self.cfg = cfg
+        self.individual_prob = float(prob)
+
+        # 制約判定に使用するベース会場。
+        self.venue = build_base_venue(cfg)
+
+        # 古いpymooなど、_doへrandom_stateが渡らない場合に
+        # 使用する予備の乱数生成器。
+        self._fallback_rng = np.random.default_rng(seed)
+
+    @staticmethod
+    def _randint(
+        rng,
+        low: int,
+        high: int,
+    ) -> int:
+        """Generatorと旧RandomStateの両方に対応した整数乱数。"""
+
+        if hasattr(rng, "integers"):
+            return int(rng.integers(low, high))
+
+        return int(rng.randint(low, high))
+
+    def _do(
+        self,
+        problem,
+        X,
+        random_state=None,
+        **kwargs,
+    ):
+        rng = (
+            random_state
+            if random_state is not None
+            else self._fallback_rng
+        )
+
+        # SBX後は、整数値ではあるがfloat型になっていることがある。
+        # 例: 3.0, 7.0
+        #
+        # to_integer_layout()へ渡せるように整数配列へ変換する。
+        Y = np.rint(
+            np.asarray(X)
+        ).astype(
+            np.int64,
+            copy=True,
+        )
+
+        lower = np.asarray(
+            problem.xl,
+            dtype=np.int64,
+        )
+
+        upper = np.asarray(
+            problem.xu,
+            dtype=np.int64,
+        )
+
+        n_booths = len(self.cfg.booths)
+
+        for individual_id in range(len(Y)):
+            # -----------------------------------------------------
+            # この個体に突然変異を適用するか判定
+            # -----------------------------------------------------
+            if float(rng.random()) > self.individual_prob:
+                continue
+
+            original = Y[individual_id].copy()
+
+            # -----------------------------------------------------
+            # 移動するブースを1個だけランダムに選択
+            # -----------------------------------------------------
+            booth_id = self._randint(
+                rng,
+                0,
+                n_booths,
+            )
+
+            x_index = 2 * booth_id
+            y_index = x_index + 1
+
+            old_x = int(original[x_index])
+            old_y = int(original[y_index])
+
+            # -----------------------------------------------------
+            # 選択したブースが取り得る全ての別座標を列挙
+            # -----------------------------------------------------
+            candidate_positions = [
+                (x_pos, y_pos)
+                for x_pos in range(
+                    int(lower[x_index]),
+                    int(upper[x_index]) + 1,
+                )
+                for y_pos in range(
+                    int(lower[y_index]),
+                    int(upper[y_index]) + 1,
+                )
+                if (x_pos, y_pos) != (old_x, old_y)
+            ]
+
+            if not candidate_positions:
+                # 別位置が存在しない場合は変更しない。
+                continue
+
+            # -----------------------------------------------------
+            # 候補座標をランダムな順番で確認
+            # -----------------------------------------------------
+            candidate_order = rng.permutation(
+                len(candidate_positions)
+            )
+
+            for candidate_id_raw in candidate_order:
+                candidate_id = int(candidate_id_raw)
+
+                new_x, new_y = candidate_positions[
+                    candidate_id
+                ]
+
+                # 元の個体をコピーし、選択したブースだけを移動する。
+                candidate = original.copy()
+
+                candidate[x_index] = new_x
+                candidate[y_index] = new_y
+
+                positions = to_integer_layout(candidate)
+
+                # -------------------------------------------------
+                # 配置全体が全制約を満たす場合だけ採用
+                # -------------------------------------------------
+                if compute_violation(
+                    self.cfg,
+                    self.venue,
+                    positions,
+                ) == 0:
+                    Y[individual_id] = candidate
+                    break
+
+            # 全候補を確認しても有効な別位置がなければ、
+            # Y[individual_id]は元の配置のままになる。
+
+        return Y
+    
+
 def run_nsga2(
     cfg: Config,
     pop_size: int | None = None,
@@ -160,6 +334,7 @@ def run_nsga2(
     elementwise_runner=None,
     seed: int = 1,
     verbose: bool = True,
+    mutation_prob: float = 0.2, # 突然変異率
 ):
     """NSGA-II を実行し pymoo の Result を返す。"""
     kwargs = {}
@@ -179,11 +354,12 @@ def run_nsga2(
             repair=RoundingRepair(),
         ),
 
-        # Polynomial Mutationも生成直後に整数へ修復する。
-        mutation=PM(
-            eta=20,
-            vtype=float,
-            repair=RoundingRepair(),
+        # 1個のブースだけを、配置全体が制約を満たす
+        # 別位置へランダムに移動する突然変異。
+        mutation=RandomValidBoothMutation(
+            cfg=cfg,
+            prob=mutation_prob,
+            seed=seed,
         ),
 
         # 整数化後に同じ設計ベクトルとなった個体を除去する。
