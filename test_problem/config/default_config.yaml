@@ -6,7 +6,7 @@ grid:
 
 time:
   dt_seconds: 1.0
-  duration_seconds: 400      # simulate_result.py の SPEC_DEFAULTS.T
+  duration_seconds: 540      # simulate_result.py の SPEC_DEFAULTS.T
   max_speed_mps: 1.0
 
 capacities:
@@ -48,7 +48,11 @@ utility_weights:             # §8 既定重み
   crowd: 0.6
 
 arrival_profile:             # 400 秒間に 400 人 = 平均 1 人/step
-  - [0, 400, 1.0]
+  - [0, 60, 1.6] # 9:00-10:00 入場直後ピーク
+  - [60, 180, 1.1] # 10:00-12:00 午前 
+  - [180, 300, 0.8] # 12:00-14:00 昼でやや低下
+  - [300, 450, 1.2] # 14:00-16:30 午後ピーク
+  - [450, 540, 0.4] # 16:30-18:00 終盤
 
 constraints:
   min_corridor_width: 1      # 20260629 には最低通路幅の追加制約なし
