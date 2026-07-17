@@ -45,7 +45,22 @@ INF_DIST = np.int32(2**30)
 # ================================================================ 設定 dataclass
 @dataclass(frozen=True)
 class BoothSpec:
-    """ブース仕様(§5)。実行時状態は BoothRuntime に分離する。"""
+    """ブース仕様(§5)。実行時状態は BoothRuntime に分離する。
+
+    kind:
+        booth       : 通常の体験ブース(受付・待機列あり)
+        kitchen_car : キッチンカー(挙動はブースと同じ。色分け用の属性)
+        table       : テーブル・椅子。セルを占有するだけで、受付・待機列・
+                      体験は持たず、来場者の目的地候補にもならない。
+    theme:
+        normal / music(音楽祭関連)。色分け用の属性。
+    area:
+        所属広場(venue_shape.areas の name)。空なら制約なし。
+        指定時はブース本体セルがその広場内に収まることが配置制約になる。
+    fixed_position:
+        最適化前の固定配置パターンでの左上座標 (x, y)。None なら未指定。
+        最適化実行時は使用されない(座標は最適化変数)。
+    """
 
     booth_id: int
     width: int
@@ -56,6 +71,15 @@ class BoothSpec:
     mean_service_seconds: float
     max_queue_length: int
     name: str = ""
+    kind: str = "booth"
+    theme: str = "normal"
+    area: str = ""
+    fixed_position: tuple | None = None
+
+    @property
+    def is_table(self) -> bool:
+        """来場者と相互作用しない占有物(テーブル・椅子)か。"""
+        return self.kind == "table"
 
 
 @dataclass(frozen=True)
@@ -80,6 +104,16 @@ class Config:
     grid_width: int = 20
     grid_height: int = 16
     cell_size_meters: float = 1.0
+    # 会場形状(実会場)。venue_areas が空なら従来どおり全面矩形。
+    # 各要素は (name, ((x, y), ...)) の組。頂点はメートル単位、y は下向き。
+    # venue_areas: ブース配置可能区域(広場)。name は BoothSpec.area から参照される。
+    # venue_walkways: 歩行可能・ブース配置不可の区域(道路)。
+    #                 グリッド境界に達する道路セルは「領域外への開口部」となり、
+    #                 来場者の入退場セル集合として扱う。
+    # venue_obstacles: 場内の通行不可障害物(樹木等)。
+    venue_areas: tuple = ()
+    venue_walkways: tuple = ()
+    venue_obstacles: tuple = ()
     # 時間(§3.1, §3.2)
     dt_seconds: float = 1.0
     duration_seconds: float = 400.0
@@ -94,6 +128,10 @@ class Config:
     entrance_side: str = "bottom"
     exit_side: str = "top"
     entrance_exit_span: int = 2
+    # 入口・出口セルの明示指定 ((x, y), ...)。省略時は venue_shape があれば
+    # 境界開口部(venue.build_base_venue で導出)、なければ辺中央の span を使う。
+    entrance_cells_override: tuple = ()
+    exit_cells_override: tuple = ()
     # ブース周辺形状
     reception_position: str = "bottom_left"
     booth_exit_position: str = "top_left"
@@ -151,12 +189,16 @@ class Config:
 
     @property
     def entrance_cells(self) -> tuple[tuple[int, int], ...]:
-        """会場境界の中央に置く入口セル。"""
+        """入口セル。明示指定があればそれを、なければ指定辺の中央を使う。"""
+        if self.entrance_cells_override:
+            return self.entrance_cells_override
         return self._boundary_cells(self.entrance_side)
 
     @property
     def exit_cells(self) -> tuple[tuple[int, int], ...]:
-        """会場境界の中央に置く出口セル。"""
+        """出口セル。明示指定があればそれを、なければ指定辺の中央を使う。"""
+        if self.exit_cells_override:
+            return self.exit_cells_override
         return self._boundary_cells(self.exit_side)
 
     def _boundary_cells(self, side: str) -> tuple[tuple[int, int], ...]:
@@ -194,12 +236,20 @@ def load_config(config_dir: str | Path) -> Config:
             booth_id=int(b["booth_id"]),
             width=int(b["width"]),
             height=int(b["height"]),
-            category=str(b["category"]),
-            attractiveness=float(b["attractiveness"]),
-            capacity=int(b["capacity"]),
-            mean_service_seconds=float(b["mean_service_seconds"]),
-            max_queue_length=int(b["max_queue_length"]),
+            category=str(b.get("category", "none")),
+            attractiveness=float(b.get("attractiveness", 0.0)),
+            capacity=int(b.get("capacity", 0)),
+            mean_service_seconds=float(b.get("mean_service_seconds", 0.0)),
+            max_queue_length=int(b.get("max_queue_length", 0)),
             name=str(b.get("name", "")),
+            kind=str(b.get("kind", "booth")),
+            theme=str(b.get("theme", "normal")),
+            area=str(b.get("area", "")),
+            fixed_position=(
+                tuple(int(v) for v in b["fixed_position"])
+                if b.get("fixed_position") is not None
+                else None
+            ),
         )
         for b in booth_raw
     )
@@ -216,17 +266,36 @@ def load_config(config_dir: str | Path) -> Config:
         )
         for p in prof_raw
     )
-    # カテゴリ順は booths.yaml の出現順(重複除去)
+    # カテゴリ順は booths.yaml の出現順(重複除去)。テーブルは対象外。
     categories: list[str] = []
     for b in booths:
-        if b.category not in categories:
+        if not b.is_table and b.category not in categories:
             categories.append(b.category)
+
+    shape = main.get("venue_shape") or {}
+
+    def _polygons(key: str) -> tuple:
+        return tuple(
+            (
+                str(item.get("name", f"{key}_{i}")),
+                tuple((float(x), float(y)) for x, y in item["polygon"]),
+            )
+            for i, item in enumerate(shape.get(key) or [])
+        )
+
+    def _explicit_cells(key: str) -> tuple:
+        return tuple((int(x), int(y)) for x, y in (main["entrance_exit"].get(key) or []))
 
     uw = main["utility_weights"]
     cfg = Config(
         grid_width=int(main["grid"]["width"]),
         grid_height=int(main["grid"]["height"]),
         cell_size_meters=float(main["grid"]["cell_size_meters"]),
+        venue_areas=_polygons("areas"),
+        venue_walkways=_polygons("walkways"),
+        venue_obstacles=_polygons("obstacles"),
+        entrance_cells_override=_explicit_cells("entrance_cells"),
+        exit_cells_override=_explicit_cells("exit_cells"),
         dt_seconds=float(main["time"]["dt_seconds"]),
         duration_seconds=float(main["time"]["duration_seconds"]),
         max_speed_mps=float(main["time"]["max_speed_mps"]),

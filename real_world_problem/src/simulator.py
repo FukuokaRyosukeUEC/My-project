@@ -83,9 +83,12 @@ class Simulation:
         self.capacity = layout.capacity.astype(np.int16)
         self.occupancy = np.zeros((H, W), dtype=np.int16)
 
-        # §9.4 静的距離場(配置ごとに 1 回、6+1 回の BFS)
+        # §9.4 静的距離場(配置ごとに 1 回、体験ブース数+1 回の BFS)。
+        # テーブル(受付なし)は目的地にならないため None。
         self.booth_fields = [
-            bfs_distance_field(self.walkable, [layout.receptions[b]])
+            None
+            if layout.receptions[b] is None
+            else bfs_distance_field(self.walkable, [layout.receptions[b]])
             for b in range(len(cfg.booths))
         ]
         self.exit_field = bfs_distance_field(self.walkable, venue.exit_cells)
@@ -199,6 +202,8 @@ class Simulation:
     def _booth_step(self, t: int) -> None:
         for rt in self.booths:
             spec = self.cfg.booths[rt.booth_id]
+            if spec.is_table:
+                continue
             ex, ey = self.layout.booth_exits[rt.booth_id]
             separate_exit = self.layout.booth_exits[rt.booth_id] != self.layout.receptions[rt.booth_id]
 
@@ -286,8 +291,8 @@ class Simulation:
         cand_ids: list[int] = []
         utils: list[float] = []
         for b, spec in enumerate(cfg.booths):
-            if b in v.visited_booths:
-                continue  # 体験済みは除外
+            if spec.is_table or b in v.visited_booths:
+                continue  # テーブルと体験済みは除外
             field_b = self.booth_fields[b]
             if field_b[y, x] >= INF_DIST:
                 continue
