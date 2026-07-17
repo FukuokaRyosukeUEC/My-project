@@ -63,9 +63,12 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
     for b in range(n_booths):
         # 20260629 方式では受付が待機列先頭と同じセル。ブース内の重複は
         # 合法なので、ブースごとに一意化してから他ブースとの競合を数える。
+        # テーブルは受付・退出・行列を持たない(None / 空)。
         claimed = set(booth_cells[b])
-        claimed.add(receptions[b])
-        claimed.add(booth_exits[b])
+        if receptions[b] is not None:
+            claimed.add(receptions[b])
+        if booth_exits[b] is not None:
+            claimed.add(booth_exits[b])
         claimed.update(qcells[b])
         g += claim(claimed)
 
@@ -80,17 +83,30 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
             if _in_bounds(cfg, x, y) and base[y, x] != EMPTY:
                 g += 1
         # 受付セル: EMPTY のみ許可(§5.1: 配置不可領域も不可)
-        rx, ry = receptions[b]
-        if _in_bounds(cfg, rx, ry) and base[ry, rx] != EMPTY:
-            g += 1
+        if receptions[b] is not None:
+            rx, ry = receptions[b]
+            if _in_bounds(cfg, rx, ry) and base[ry, rx] != EMPTY:
+                g += 1
         # 行列セル: EMPTY または FORBIDDEN(通行可)を許可(§5.2)
         for (x, y) in qcells[b]:
             if _in_bounds(cfg, x, y) and base[y, x] not in (EMPTY, FORBIDDEN):
                 g += 1
         # 体験後退出セル: EMPTY のみ許可。受付共用時の重複検査は上で一意化済み。
-        ex, ey = booth_exits[b]
-        if _in_bounds(cfg, ex, ey) and base[ey, ex] != EMPTY:
-            g += 1
+        if booth_exits[b] is not None:
+            ex, ey = booth_exits[b]
+            if _in_bounds(cfg, ex, ey) and base[ey, ex] != EMPTY:
+                g += 1
+
+    # --- 所属広場制約: BoothSpec.area 指定時、本体セルはその広場内に収める
+    if venue.area_masks:
+        for b in range(n_booths):
+            area = cfg.booths[b].area
+            mask = venue.area_masks.get(area) if area else None
+            if mask is None:
+                continue
+            for (x, y) in booth_cells[b]:
+                if _in_bounds(cfg, x, y) and not mask[y, x]:
+                    g += 1
 
     if g > 0:
         return g  # 幾何違反があれば到達性チェックは行わない(高速化)
@@ -105,15 +121,20 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
     if all(ent_field[y, x] >= INF_DIST for (x, y) in venue.exit_cells):
         g += REACHABILITY_PENALTY
 
-    # 項目 7: 入口→各ブース受付の到達性
+    # 項目 7: 入口→各ブース受付の到達性(テーブルは受付なし)
     for b in range(n_booths):
+        if receptions[b] is None:
+            continue
         rx, ry = receptions[b]
         if ent_field[ry, rx] >= INF_DIST:
             g += REACHABILITY_PENALTY
 
     # ブース退出セル→会場出口の到達性
     exit_field = bfs_distance_field(walkable, venue.exit_cells)
-    for ex, ey in booth_exits:
+    for cell in booth_exits:
+        if cell is None:
+            continue
+        ex, ey = cell
         if exit_field[ey, ex] >= INF_DIST:
             g += REACHABILITY_PENALTY
 

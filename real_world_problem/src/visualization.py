@@ -22,10 +22,10 @@ import numpy as np
 import pandas as pd
 from matplotlib import animation
 from matplotlib.lines import Line2D
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Patch, Rectangle
 
 from .models import (
-    BOOTH,
+    BOOTH,  # noqa: F401 (セル種別の網羅性のため保持)
     CHOOSING,
     ENTRANCE,
     EXIT,
@@ -35,6 +35,7 @@ from .models import (
     QUEUE,
     QUEUING,
     WALKING,
+    WALL,
     Config,
 )
 from .venue import Layout
@@ -50,16 +51,37 @@ STATE_COLORS = {
 BLOCKED_COLOR = "#d62728"  # 赤: セル容量により移動できず待機中
 
 _CELL_FACE = {
-    BOOTH: "#8c564b",
+    WALL: "#4d4d4d",
     QUEUE: "#f7e8a0",
     ENTRANCE: "#a6d8a8",
     EXIT: "#f4a9a8",
     FORBIDDEN: "#e6e6e6",
 }
 
+#: (kind, theme) ごとのブース塗り色。通常ブースとの見分け用。
+BOOTH_ATTR_FACE = {
+    ("booth", "normal"): "#8c564b",        # 茶: 通常ブース
+    ("booth", "music"): "#9467bd",         # 紫: 音楽祭関連ブース
+    ("kitchen_car", "normal"): "#ff7f0e",  # 橙: 通常キッチンカー
+    ("kitchen_car", "music"): "#e377c2",   # 桃: 音楽祭関連キッチンカー
+    ("table", "normal"): "#9e9e9e",        # 灰: テーブル・椅子
+}
+BOOTH_ATTR_LABEL = {
+    ("booth", "normal"): "通常ブース",
+    ("booth", "music"): "音楽祭ブース",
+    ("kitchen_car", "normal"): "キッチンカー",
+    ("kitchen_car", "music"): "音楽祭キッチンカー",
+    ("table", "normal"): "テーブル・椅子",
+}
 
-def draw_venue(ax, cfg: Config, layout: Layout) -> None:
-    """会場・ブース・受付・行列セルの静的描画。"""
+
+def _booth_face(spec) -> str:
+    key = (spec.kind, "normal" if spec.is_table else spec.theme)
+    return BOOTH_ATTR_FACE.get(key, BOOTH_ATTR_FACE[("booth", "normal")])
+
+
+def draw_venue(ax, cfg: Config, layout: Layout, legend: bool = False) -> None:
+    """会場・ブース・受付・行列セルの静的描画。ブースは属性で色分けする。"""
     H, W = cfg.grid_height, cfg.grid_width
     ax.set_xlim(-0.5, W - 0.5)
     ax.set_ylim(H - 0.5, -0.5)  # y は下へ増加(§3.5)
@@ -69,20 +91,38 @@ def draw_venue(ax, cfg: Config, layout: Layout) -> None:
         ys, xs = np.where(grid == ctype)
         for x, y in zip(xs, ys):
             ax.add_patch(Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor=color, edgecolor="none"))
+    used_attrs = []
     for b, (bx, by) in enumerate(layout.positions):
         spec = cfg.booths[b]
+        face = _booth_face(spec)
+        key = (spec.kind, "normal" if spec.is_table else spec.theme)
+        if key not in used_attrs:
+            used_attrs.append(key)
         ax.add_patch(
             Rectangle(
                 (bx - 0.5, by - 0.5), spec.width, spec.height,
-                fill=False, edgecolor="black", linewidth=1.2,
+                facecolor=face, edgecolor="black", linewidth=1.2,
             )
         )
-        ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b + 1}",
-                ha="center", va="center", fontsize=9)
-        rx, ry = layout.receptions[b]
-        ax.plot(rx, ry, marker="v", color="black", markersize=5)
-        ex, ey = layout.booth_exits[b]
-        ax.plot(ex, ey, marker="^", color="black", markersize=5)
+        if not spec.is_table:
+            ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b + 1}",
+                    ha="center", va="center", fontsize=7, color="white")
+        if layout.receptions[b] is not None:
+            rx, ry = layout.receptions[b]
+            ax.plot(rx, ry, marker="v", color="black", markersize=4)
+        if layout.booth_exits[b] is not None:
+            ex, ey = layout.booth_exits[b]
+            ax.plot(ex, ey, marker="^", color="black", markersize=4)
+    if legend:
+        handles = [
+            Patch(facecolor=BOOTH_ATTR_FACE[k], edgecolor="black",
+                  label=BOOTH_ATTR_LABEL.get(k, str(k)))
+            for k in used_attrs
+        ]
+        handles.append(Patch(facecolor=_CELL_FACE[QUEUE], label="待機列"))
+        handles.append(Patch(facecolor=_CELL_FACE[FORBIDDEN], label="道路(配置不可)"))
+        ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0),
+                  fontsize=8, framealpha=0.9)
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -323,8 +363,9 @@ def draw_venue_outline(ax, cfg: Config, layout: Layout) -> None:
         spec = cfg.booths[b]
         ax.add_patch(Rectangle((bx - 0.5, by - 0.5), spec.width, spec.height,
                                fill=True, facecolor="#cccccc", edgecolor="black", linewidth=1.0))
-        ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b + 1}",
-                ha="center", va="center", fontsize=8)
+        if not spec.is_table:
+            ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b + 1}",
+                    ha="center", va="center", fontsize=7)
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -406,6 +447,7 @@ def render_animation(cfg: Config, layout: Layout, frames, path: str | Path, fps:
         count_lines.extend(
             f"B{booth_id + 1}: {active:>2} / {queued:>2}"
             for booth_id, active, queued in booth_stats
+            if not cfg.booths[booth_id].is_table
         )
         booth_count_text.set_text("\n".join(count_lines))
         return scat, label, booth_count_text

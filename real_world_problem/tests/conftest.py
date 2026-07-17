@@ -20,7 +20,8 @@ PERIMETER_LAYOUT = ((4, 2), (12, 11), (7, 3), (16, 6), (3, 8), (10, 6))
 
 @pytest.fixture(scope="session")
 def cfg():
-    return load_config(ROOT / "config")
+    # 検証基準の 20260629 形状(20×16 矩形)。実会場形状は config/ 側で定義する。
+    return load_config(Path(__file__).resolve().parent / "config_20260629")
 
 
 @pytest.fixture(scope="session")
