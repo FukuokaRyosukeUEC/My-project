@@ -23,6 +23,7 @@ from pymoo.core.problem import StarmapParallelization  # noqa: E402
 from src.constraints import to_integer_layout  # noqa: E402
 from src.models import load_config  # noqa: E402
 from src.optimization import (  # noqa: E402
+    calculate_hv_history,
     run_nsga2,
     sample_valid_layout,
     save_results,
@@ -35,6 +36,7 @@ from src.venue import apply_layout  # noqa: E402
 from src.visualization import (  # noqa: E402
     comparison_table,
     plot_heatmaps,
+    plot_hypervolume_history,
     plot_pareto_front,
     plot_time_series_comparison,
 )
@@ -72,6 +74,44 @@ def main() -> None:
     # 最適化ログ(世代別の目的値集計は verbose 出力に委ね、最終集団を保存)
     pd.DataFrame(F, columns=["f_move", "f_congestion"]).to_csv(
         out / "optimization_log.csv", index_label="pareto_index"
+    )
+    
+    # -------------------------------------------------------------
+    # 世代ごとのHypervolume（HV）
+    # -------------------------------------------------------------
+    # 全世代で同じ参照点を使用する。
+    # 参照点は、全世代の実行可能解の最大目的値に、
+    # 目的値レンジの10%分の余白を加えて自動設定する。
+    hv_history, hv_reference_point = calculate_hv_history(
+        res,
+        reference_margin=0.1,
+    )
+
+    # 世代ごとのHVをCSVへ保存
+    hv_history.to_csv(
+        out / "hv_history.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    # HVの世代推移をresultsフォルダへ保存
+    plot_hypervolume_history(
+        hv_history,
+        out / "hypervolume_over_generations.png",
+    )
+
+    # コンソールにも参照点と最終世代HVを表示
+    print("\n=== Hypervolume ===")
+
+    print(
+        "reference point = "
+        f"({hv_reference_point[0]:.6g}, "
+        f"{hv_reference_point[1]:.6g})"
+    )
+
+    print(
+        "final HV       = "
+        f"{hv_history['hypervolume'].iloc[-1]:.6g}"
     )
 
     # --- §20 代表 3 案の可視化・比較表(最適化終了後に再評価)

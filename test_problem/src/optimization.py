@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.core.callback import Callback
 from pymoo.core.mutation import Mutation
 from pymoo.core.problem import ElementwiseProblem
 from pymoo.core.sampling import Sampling
@@ -326,6 +327,359 @@ class RandomValidBoothMutation(Mutation):
 
         return Y
     
+class ObjectiveHistoryCallback(Callback):
+    """各世代の環境選択後集団の目的関数値と制約値を保存する。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[dict] = []
+
+    def notify(self, algorithm) -> None:
+        # その世代の環境選択後集団を取得
+        pop = algorithm.pop
+
+        # 目的関数値
+        F = np.asarray(
+            pop.get("F"),
+            dtype=float,
+        ).copy()
+
+        # 制約違反量
+        G_raw = pop.get("G")
+
+        if G_raw is None:
+            G = None
+        else:
+            G = np.asarray(
+                G_raw,
+                dtype=float,
+            ).copy()
+
+        self.records.append(
+            {
+                "generation": int(algorithm.n_gen),
+                "F": F,
+                "G": G,
+            }
+        )
+
+
+def _feasible_objectives(record: dict) -> np.ndarray:
+    """履歴1世代分から、有限かつ実行可能な目的関数値だけを返す。"""
+
+    F = np.atleast_2d(
+        np.asarray(
+            record["F"],
+            dtype=float,
+        )
+    )
+
+    # NaNやinfを含む目的関数値を除外
+    finite = np.all(
+        np.isfinite(F),
+        axis=1,
+    )
+
+    G = record.get("G")
+
+    if G is None or np.size(G) == 0:
+        feasible = np.ones(
+            F.shape[0],
+            dtype=bool,
+        )
+    else:
+        G = np.asarray(
+            G,
+            dtype=float,
+        )
+
+        if G.ndim == 1:
+            G = G.reshape(-1, 1)
+
+        # pymooではG <= 0が制約を満たす解
+        feasible = np.all(
+            G <= 0.0,
+            axis=1,
+        )
+
+    return F[finite & feasible]
+
+
+def _non_dominated_2d(F: np.ndarray) -> np.ndarray:
+    """2目的・最小化問題の非劣解集合を返す。"""
+
+    F = np.atleast_2d(
+        np.asarray(
+            F,
+            dtype=float,
+        )
+    )
+
+    if F.size == 0:
+        return np.empty(
+            (0, 2),
+            dtype=float,
+        )
+
+    if F.shape[1] != 2:
+        raise ValueError(
+            "HV calculation currently supports exactly "
+            f"two objectives: {F.shape[1]}"
+        )
+
+    # 同じ目的関数ベクトルを除去
+    points = np.unique(
+        F,
+        axis=0,
+    )
+
+    # 第1目的を昇順、第1目的が同値なら第2目的を昇順に並べる
+    order = np.lexsort(
+        (
+            points[:, 1],
+            points[:, 0],
+        )
+    )
+    points = points[order]
+
+    # 左から走査し、第2目的の最良値を更新する点だけを残す
+    nondominated = []
+    best_second = np.inf
+
+    for point in points:
+        if point[1] < best_second:
+            nondominated.append(point)
+            best_second = point[1]
+
+    return np.asarray(
+        nondominated,
+        dtype=float,
+    )
+
+
+def _hypervolume_2d(
+    F: np.ndarray,
+    reference_point: np.ndarray,
+) -> float:
+    """2目的・最小化問題のHVを矩形和により計算する。"""
+
+    ref = np.asarray(
+        reference_point,
+        dtype=float,
+    ).reshape(-1)
+
+    if ref.size != 2:
+        raise ValueError(
+            "reference_point must contain exactly two values"
+        )
+
+    F = np.atleast_2d(
+        np.asarray(
+            F,
+            dtype=float,
+        )
+    )
+
+    if F.size == 0:
+        return 0.0
+
+    # 参照点よりも悪い成分を持つ解はHVに寄与しない
+    inside = np.all(
+        F < ref,
+        axis=1,
+    )
+
+    nd = _non_dominated_2d(
+        F[inside]
+    )
+
+    if nd.size == 0:
+        return 0.0
+
+    hv = 0.0
+    previous_y = float(ref[1])
+
+    for x_value, y_value in nd:
+        width = float(
+            ref[0] - x_value
+        )
+        height = float(
+            previous_y - y_value
+        )
+
+        if width > 0.0 and height > 0.0:
+            hv += width * height
+
+        previous_y = min(
+            previous_y,
+            float(y_value),
+        )
+
+    return float(hv)
+
+
+def calculate_hv_history(
+    res,
+    reference_point: np.ndarray | None = None,
+    reference_margin: float = 0.1,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """各世代の実行可能な非劣解集合に対するHVを計算する。
+
+    全世代で同一の参照点を使用する。
+
+    reference_pointがNoneの場合は、全世代の実行可能解から
+    各目的の最大値を求め、目的値レンジのreference_margin分だけ
+    悪い方向へ余白を加えた点を参照点とする。
+    """
+
+    records = getattr(
+        res,
+        "objective_history",
+        None,
+    )
+
+    if not records:
+        raise ValueError(
+            "Objective history is unavailable. "
+            "Run the optimizer with ObjectiveHistoryCallback enabled."
+        )
+
+    if reference_margin <= 0.0:
+        raise ValueError(
+            "reference_margin must be positive"
+        )
+
+    # 各世代の実行可能解
+    feasible_sets = [
+        _feasible_objectives(record)
+        for record in records
+    ]
+
+    nonempty = [
+        F
+        for F in feasible_sets
+        if F.size > 0
+    ]
+
+    if not nonempty:
+        raise ValueError(
+            "No feasible objective vectors were found in the history"
+        )
+
+    all_feasible = np.vstack(
+        nonempty
+    )
+
+    if all_feasible.shape[1] != 2:
+        raise ValueError(
+            "HV calculation currently supports exactly "
+            f"two objectives: {all_feasible.shape[1]}"
+        )
+
+    # ---------------------------------------------------------
+    # 全世代共通の参照点を決定
+    # ---------------------------------------------------------
+    if reference_point is None:
+        ideal = np.min(
+            all_feasible,
+            axis=0,
+        )
+        nadir = np.max(
+            all_feasible,
+            axis=0,
+        )
+
+        span = nadir - ideal
+
+        # 目的値レンジが0の軸にも正の余白を与える
+        fallback_scale = np.maximum(
+            np.abs(nadir),
+            1.0,
+        )
+
+        padding = np.where(
+            span > 0.0,
+            reference_margin * span,
+            reference_margin * fallback_scale,
+        )
+
+        ref = nadir + padding
+
+    else:
+        ref = np.asarray(
+            reference_point,
+            dtype=float,
+        ).reshape(-1)
+
+        if ref.size != 2:
+            raise ValueError(
+                "reference_point must contain exactly two values"
+            )
+
+        if not np.all(
+            np.isfinite(ref)
+        ):
+            raise ValueError(
+                "reference_point contains non-finite values: "
+                f"{ref}"
+            )
+
+        max_objectives = np.max(
+            all_feasible,
+            axis=0,
+        )
+
+        if np.any(
+            ref <= max_objectives
+        ):
+            raise ValueError(
+                "reference_point must be strictly worse than every "
+                "feasible objective vector. "
+                f"max objectives={max_objectives}, "
+                f"reference_point={ref}"
+            )
+
+    # ---------------------------------------------------------
+    # 世代ごとのHVを計算
+    # ---------------------------------------------------------
+    rows = []
+
+    for record, feasible_F in zip(
+        records,
+        feasible_sets,
+    ):
+        nd = _non_dominated_2d(
+            feasible_F
+        )
+
+        rows.append(
+            {
+                "generation": int(
+                    record["generation"]
+                ),
+                "hypervolume": _hypervolume_2d(
+                    nd,
+                    ref,
+                ),
+                "n_feasible": int(
+                    feasible_F.shape[0]
+                ),
+                "n_nondominated": int(
+                    nd.shape[0]
+                ),
+                "reference_f_move": float(
+                    ref[0]
+                ),
+                "reference_f_congestion": float(
+                    ref[1]
+                ),
+            }
+        )
+
+    return (
+        pd.DataFrame(rows),
+        ref,
+    )
 
 def run_nsga2(
     cfg: Config,
@@ -365,14 +719,25 @@ def run_nsga2(
         # 整数化後に同じ設計ベクトルとなった個体を除去する。
         eliminate_duplicates=True,
     )
-    return minimize(
+
+    # 各世代の目的関数値と制約値を記録する
+    history_callback = ObjectiveHistoryCallback()
+
+    res = minimize(
         problem,
         algorithm,
         ("n_gen", n_gen or cfg.n_generations),
         seed=seed,
         verbose=verbose,
+        callback=history_callback,
         save_history=False,
     )
+
+    # pymooのalgorithm履歴全体は保存せず、
+    # HV計算に必要なFとGだけをResultへ付加する。
+    res.objective_history = history_callback.records
+
+    return res
 
 
 # ---------------------------------------------------------------- 代表解と出力(§19)
