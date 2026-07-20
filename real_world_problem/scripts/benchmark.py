@@ -15,7 +15,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.constraints import round_layout  # noqa: E402
+from src.constraints import to_integer_layout  # noqa: E402
 from src.models import load_config  # noqa: E402
 from src.optimization import sample_valid_layout, variable_bounds  # noqa: E402
 from src.parallel import build_context, evaluate_layout  # noqa: E402
@@ -34,7 +34,7 @@ def main() -> int:
     lower, upper = variable_bounds(cfg)
 
     benchmark_layouts = [
-        round_layout(sample_valid_layout(rng, lower, upper, cfg, ctx.venue))
+        to_integer_layout(sample_valid_layout(rng, lower, upper, cfg, ctx.venue))
         for _ in range(args.n)
     ]
 

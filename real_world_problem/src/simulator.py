@@ -112,8 +112,11 @@ class Simulation:
 
         # 集計
         self.congestion_sum = 0.0
+        self.weighted_congestion_sum = 0.0
         self.max_occ_ratio = 0.0
         self.n_walkable = int(np.sum(self.walkable))
+        self.congestion_weights = self._make_congestion_weights()
+        self.congestion_weight_sum = float(np.sum(self.congestion_weights[self.walkable]))
         self.heatmap = np.zeros((H, W), dtype=np.int64) if collect_heatmap else None
         self.over_map = np.zeros((H, W), dtype=np.float64) if collect_heatmap else None
         self.frames: list = []
@@ -131,6 +134,70 @@ class Simulation:
             if v.visitor_id == vid:
                 return v
         raise KeyError(vid)
+
+    def _make_congestion_weights(self) -> np.ndarray:
+        """ブース周辺セルだけを混雑度計算の対象にするマスクを作る。
+
+        重みは歩行可能セルに対してだけ最終的に使う。
+        - ブース関連セルからマンハッタン距離 target_radius 以内: 1.0
+        - それ以外: 0.0
+
+        ここでいうブース関連セルは、ブース本体・受付セル・ブース出口セル・
+        待機列セルを含む。これにより、f_congestion は会場全体の平均混雑度
+        ではなく「ブース周辺混雑度」として計算される。
+        """
+        cfg = self.cfg
+        H, W = cfg.grid_height, cfg.grid_width
+
+        # 0.0 = 評価対象外、1.0 = 評価対象
+        weights = np.zeros((H, W), dtype=np.float64)
+
+        booth_related: set[tuple[int, int]] = set()
+
+        def add_cell(cell) -> None:
+            if cell is None:
+                return
+            x, y = int(cell[0]), int(cell[1])
+            if 0 <= x < W and 0 <= y < H:
+                booth_related.add((x, y))
+
+        # 受付セル・ブース出口セル・待機列セルをブース周辺の代表点として使う。
+        for cell in getattr(self.layout, "receptions", []):
+            add_cell(cell)
+        for cell in getattr(self.layout, "booth_exits", []):
+            add_cell(cell)
+        for qcells in getattr(self.layout, "queue_cells", []):
+            for cell in qcells:
+                add_cell(cell)
+
+        # layout.positions がある場合はブース本体セルも代表点に含める。
+        # 座標系は本実装内の他処理に合わせて (x, y) として扱う。
+        for b, pos in enumerate(getattr(self.layout, "positions", [])):
+            if b >= len(cfg.booths):
+                break
+            spec = cfg.booths[b]
+            x0, y0 = int(round(pos[0])), int(round(pos[1]))
+            for y in range(y0, y0 + spec.height):
+                for x in range(x0, x0 + spec.width):
+                    if 0 <= x < W and 0 <= y < H:
+                        booth_related.add((x, y))
+
+        if not booth_related:
+            return weights
+
+        # ブース周辺と見なす範囲。まずは半径3セルを推奨。
+        target_radius = 3
+        booth_xy = list(booth_related)
+
+        for y in range(H):
+            for x in range(W):
+                if not self.walkable[y, x]:
+                    continue
+                d_min = min(abs(x - bx) + abs(y - by) for bx, by in booth_xy)
+                if d_min <= target_radius:
+                    weights[y, x] = 1.0
+
+        return weights
 
     # ------------------------------------------------------------ 乱数
     def _rng_of(self, vid: int) -> np.random.Generator:
@@ -556,16 +623,25 @@ class Simulation:
 
         occ = self.occupancy[self.walkable].astype(np.float64)
         cap = self.capacity[self.walkable].astype(np.float64)
+        weights = self.congestion_weights[self.walkable].astype(np.float64)
 
         # ---------------------------------------------------------
         # 1. タイムステップ t における混雑度
         # ---------------------------------------------------------
-        excess = np.maximum(
-            0.0,
-            occ / cap - cfg.safe_occupancy_ratio,
-        )
+        #excess = np.maximum(
+        #    0.0,
+        #    occ / cap - cfg.safe_occupancy_ratio,
+        #)
 
-        step_congestion_sum = float(np.sum(excess * excess))
+        denom = np.maximum(1.0, cap - 1.0)  # 1人までは混雑なし、容量いっぱいで1.0
+                                 
+        congestion_contrib = np.clip((occ - 1.0) / denom, 0.0, 1.0)
+
+        # 従来の非加重混雑度
+        step_congestion_sum = float(np.sum(congestion_contrib))
+
+        # ブース周辺セルだけを評価した混雑度
+        step_weighted_congestion_sum = float(np.sum(weights * congestion_contrib))
 
         # 通行可能セル数で正規化した、その時点の混雑度
         if self.n_walkable > 0:
@@ -573,8 +649,15 @@ class Simulation:
         else:
             step_congestion = 0.0
 
+        # 時系列表示は，目的関数に近いブース周辺混雑度を使う。
+        if self.congestion_weight_sum > 0:
+            step_weighted_congestion = step_weighted_congestion_sum / self.congestion_weight_sum
+        else:
+            step_weighted_congestion = step_congestion
+
         # 最終目的関数計算用の累積値
         self.congestion_sum += step_congestion_sum
+        self.weighted_congestion_sum += step_weighted_congestion_sum
 
         # ---------------------------------------------------------
         # 2. タイムステップ t までの移動負担
@@ -600,7 +683,7 @@ class Simulation:
         # 3. 時系列として保存
         # ---------------------------------------------------------
         self.time_steps.append(t)
-        self.congestion_history.append(step_congestion)
+        self.congestion_history.append(step_weighted_congestion)
         self.movement_history.append(movement_burden)
 
         # ---------------------------------------------------------
