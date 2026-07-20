@@ -271,6 +271,85 @@ def plot_pareto_front(
     fig.savefig(path, dpi=150)
     plt.close(fig)
     
+def plot_hypervolume_history(
+    hv_history: pd.DataFrame,
+    path: str | Path,
+) -> None:
+    """世代ごとのHypervolume推移を画像として保存する。"""
+
+    required = {
+        "generation",
+        "hypervolume",
+    }
+
+    missing = required.difference(
+        hv_history.columns
+    )
+
+    if missing:
+        raise ValueError(
+            "hv_history is missing columns: "
+            f"{sorted(missing)}"
+        )
+
+    if hv_history.empty:
+        raise ValueError(
+            "hv_history must not be empty"
+        )
+
+    generations = hv_history[
+        "generation"
+    ].to_numpy(
+        dtype=int,
+    )
+
+    hypervolume = hv_history[
+        "hypervolume"
+    ].to_numpy(
+        dtype=float,
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(8, 5)
+    )
+
+    ax.plot(
+        generations,
+        hypervolume,
+        marker="o",
+        markersize=3.5,
+        linewidth=1.8,
+    )
+
+    ax.set_xlabel(
+        "Generation"
+    )
+    ax.set_ylabel(
+        "Hypervolume (HV)"
+    )
+    ax.set_title(
+        "Hypervolume over generations"
+    )
+    ax.grid(
+        alpha=0.3
+    )
+
+    # 値が非常に小さい、または大きい場合は科学表記を使用
+    ax.ticklabel_format(
+        axis="y",
+        style="sci",
+        scilimits=(-3, 4),
+    )
+
+    fig.tight_layout()
+
+    fig.savefig(
+        path,
+        dpi=150,
+    )
+
+    plt.close(fig)
+    
 def plot_time_series_comparison(
     initial_result,
     representative_results: dict,

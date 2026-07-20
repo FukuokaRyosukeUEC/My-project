@@ -24,10 +24,49 @@ from .venue import (
 REACHABILITY_PENALTY = 100.0
 
 
-def round_layout(x: np.ndarray) -> tuple:
-    """§15.2: 実数 12 次元ベクトルを整数配置 ((x1,y1),...,(x6,y6)) へ丸める。"""
-    v = np.asarray(x, dtype=float).reshape(-1, 2)
-    return tuple((int(round(a)), int(round(b))) for a, b in v)
+def to_integer_layout(x: np.ndarray) -> tuple[tuple[int, int], ...]:
+    """整数の設計ベクトルを ((x1, y1), ..., (xn, yn)) に変換する。
+
+    小数を暗黙に丸めない。
+    小数成分が含まれていれば、最適化演算子の整数化設定が
+    適用されていないものとして ValueError を発生させる。
+    """
+    values = np.asarray(x)
+
+    if values.size % 2 != 0:
+        raise ValueError(
+            f"design vector length must be even: {values.size}"
+        )
+
+    if not np.all(np.isfinite(values)):
+        raise ValueError(
+            "design vector contains non-finite values"
+        )
+
+    rounded = np.rint(values)
+
+    # 3.0 のような整数値の浮動小数点表現は許可するが、
+    # 3.2 のような実際の小数値は許可しない。
+    if not np.allclose(
+        values,
+        rounded,
+        rtol=0.0,
+        atol=1.0e-12,
+    ):
+        raise ValueError(
+            "design vector must contain integers; "
+            f"fractional values were found: {values}"
+        )
+
+    pairs = rounded.astype(
+        np.int64,
+        copy=False,
+    ).reshape(-1, 2)
+
+    return tuple(
+        (int(x_pos), int(y_pos))
+        for x_pos, y_pos in pairs
+    )
 
 
 def _in_bounds(cfg: Config, x: int, y: int) -> bool:
@@ -160,6 +199,14 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
     return g
 
 
-def compute_violation_vector(cfg: Config, venue: Venue, x: np.ndarray) -> float:
-    """実数 12 次元ベクトルを丸めて違反量を返すユーティリティ。"""
-    return compute_violation(cfg, venue, round_layout(x))
+def compute_violation_vector(
+    cfg: Config,
+    venue: Venue,
+    x: np.ndarray,
+) -> float:
+    """整数の設計ベクトルに対する違反量を返すユーティリティ。"""
+    return compute_violation(
+        cfg,
+        venue,
+        to_integer_layout(x),
+    )
