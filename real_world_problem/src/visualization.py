@@ -38,7 +38,11 @@ from .models import (
     WALL,
     Config,
 )
-from .venue import Layout
+from .venue import (
+    Layout,
+    THETA_ARROWS,
+    oriented_booth_size,
+)
 
 #: §20.1 エージェント色分け(赤=移動不可待機は blocked_count で近似表示)
 STATE_COLORS = {
@@ -92,27 +96,78 @@ def draw_venue(ax, cfg: Config, layout: Layout, legend: bool = False) -> None:
         for x, y in zip(xs, ys):
             ax.add_patch(Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor=color, edgecolor="none"))
     used_attrs = []
-    for b, (bx, by) in enumerate(layout.positions):
+    for b, (
+        bx,
+        by,
+        theta,
+    ) in enumerate(layout.positions):
         spec = cfg.booths[b]
+
+        width, height = oriented_booth_size(
+            cfg,
+            b,
+            theta,
+        )
+
         face = _booth_face(spec)
-        key = (spec.kind, "normal" if spec.is_table else spec.theme)
+
+        key = (
+            spec.kind,
+            "normal"
+            if spec.is_table
+            else spec.theme,
+        )
+
         if key not in used_attrs:
             used_attrs.append(key)
+
         ax.add_patch(
             Rectangle(
-                (bx - 0.5, by - 0.5), spec.width, spec.height,
-                facecolor=face, edgecolor="black", linewidth=1.2,
+                (
+                    bx - 0.5,
+                    by - 0.5,
+                ),
+                width,
+                height,
+                facecolor=face,
+                edgecolor="black",
+                linewidth=1.2,
             )
         )
+
         if not spec.is_table:
-            ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b + 1}",
-                    ha="center", va="center", fontsize=7, color="white")
+            ax.text(
+                bx + width / 2 - 0.5,
+                by + height / 2 - 0.5,
+                f"B{b + 1} "
+                f"{THETA_ARROWS[int(theta)]}",
+                ha="center",
+                va="center",
+                fontsize=7,
+                color="white",
+            )
+
         if layout.receptions[b] is not None:
             rx, ry = layout.receptions[b]
-            ax.plot(rx, ry, marker="v", color="black", markersize=4)
+
+            ax.plot(
+                rx,
+                ry,
+                marker="v",
+                color="black",
+                markersize=4,
+            )
+
         if layout.booth_exits[b] is not None:
             ex, ey = layout.booth_exits[b]
-            ax.plot(ex, ey, marker="^", color="black", markersize=4)
+
+            ax.plot(
+                ex,
+                ey,
+                marker="^",
+                color="black",
+                markersize=4,
+            )
     if legend:
         handles = [
             Patch(facecolor=BOOTH_ATTR_FACE[k], edgecolor="black",
@@ -437,14 +492,50 @@ def plot_heatmaps(cfg: Config, layout: Layout, heatmap, over_map, path: str | Pa
     plt.close(fig)
 
 
-def draw_venue_outline(ax, cfg: Config, layout: Layout) -> None:
-    for b, (bx, by) in enumerate(layout.positions):
+def draw_venue_outline(
+    ax,
+    cfg: Config,
+    layout: Layout,
+) -> None:
+    for b, (
+        bx,
+        by,
+        theta,
+    ) in enumerate(layout.positions):
         spec = cfg.booths[b]
-        ax.add_patch(Rectangle((bx - 0.5, by - 0.5), spec.width, spec.height,
-                               fill=True, facecolor="#cccccc", edgecolor="black", linewidth=1.0))
+
+        width, height = oriented_booth_size(
+            cfg,
+            b,
+            theta,
+        )
+
+        ax.add_patch(
+            Rectangle(
+                (
+                    bx - 0.5,
+                    by - 0.5,
+                ),
+                width,
+                height,
+                fill=True,
+                facecolor="#cccccc",
+                edgecolor="black",
+                linewidth=1.0,
+            )
+        )
+
         if not spec.is_table:
-            ax.text(bx + spec.width / 2 - 0.5, by + spec.height / 2 - 0.5, f"B{b + 1}",
-                    ha="center", va="center", fontsize=7)
+            ax.text(
+                bx + width / 2 - 0.5,
+                by + height / 2 - 0.5,
+                f"B{b + 1} "
+                f"{THETA_ARROWS[int(theta)]}",
+                ha="center",
+                va="center",
+                fontsize=7,
+            )
+
     ax.set_xticks([])
     ax.set_yticks([])
 

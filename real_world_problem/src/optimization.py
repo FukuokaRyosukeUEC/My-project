@@ -33,44 +33,69 @@ from .venue import (
     position_bounds,
     queue_cells_of,
     reception_cell,
+    VALID_THETAS,
 )
 
 
 def variable_bounds(
     cfg: Config,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """ブース座標の整数上下限を返す。
+    """``(x, y, theta)`` の整数上下限を返す。
 
-    ブース本体・受付・退出セル・待機列を含む形状全体が
-    会場内に収まる範囲を使用する。
+    x, y は4方向すべての配置可能範囲の和集合、
+    theta は0～3とする。
     """
     xl = []
     xu = []
 
     for booth_id, _spec in enumerate(cfg.booths):
-        xmin, xmax, ymin, ymax = position_bounds(
-            cfg,
-            booth_id,
-        )
+        bounds = [
+            position_bounds(
+                cfg,
+                booth_id,
+                theta,
+            )
+            for theta in VALID_THETAS
+        ]
 
-        xl += [xmin, ymin]
-        xu += [xmax, ymax]
+        xl += [
+            min(b[0] for b in bounds),
+            min(b[2] for b in bounds),
+            min(VALID_THETAS),
+        ]
+
+        xu += [
+            max(b[1] for b in bounds),
+            max(b[3] for b in bounds),
+            max(VALID_THETAS),
+        ]
 
     return (
-        np.asarray(xl, dtype=np.int64),
-        np.asarray(xu, dtype=np.int64),
+        np.asarray(
+            xl,
+            dtype=np.int64,
+        ),
+        np.asarray(
+            xu,
+            dtype=np.int64,
+        ),
     )
 
 
 class LayoutProblem(ElementwiseProblem):
-    """12 次元・2 目的・制約 1 本の配置最適化問題(§15.1)。"""
+    """3×ブース数次元・2目的・制約1本の配置最適化問題。"""
 
-    def __init__(self, cfg: Config, **kwargs) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        **kwargs,
+    ) -> None:
         self.cfg = cfg
+
         xl, xu = variable_bounds(cfg)
 
         super().__init__(
-            n_var=len(cfg.booths) * 2,
+            n_var=len(cfg.booths) * 3,
             n_obj=2,
             n_ieq_constr=1,
             xl=xl,
@@ -79,9 +104,23 @@ class LayoutProblem(ElementwiseProblem):
             **kwargs,
         )
 
-    def _evaluate(self, x, out, *args, **kwargs):
-        f_move, f_cong, g, kpis = evaluate_vector(x, self.cfg)
-        out["F"] = [f_move, f_cong]
+    def _evaluate(
+        self,
+        x,
+        out,
+        *args,
+        **kwargs,
+    ):
+        f_move, f_cong, g, kpis = evaluate_vector(
+            x,
+            self.cfg,
+        )
+
+        out["F"] = [
+            f_move,
+            f_cong,
+        ]
+
         out["G"] = [g]
         out["kpis"] = kpis
 
@@ -120,109 +159,290 @@ class ValidLayoutSampling(Sampling):
         return out
 
 
-def _booth_claimed_cells(cfg, booth_id, x, y):
-    """このブースが占有するセル集合(本体・受付・退出・行列)。
+def _booth_claimed_cells(
+    cfg,
+    booth_id,
+    x,
+    y,
+    theta,
+):
+    """このブースが占有するセル集合。"""
+    claimed = set(
+        booth_cells_of(
+            cfg,
+            booth_id,
+            x,
+            y,
+            theta,
+        )
+    )
 
-    テーブル(受付・退出・行列を持たない)は本体セルのみになる。
-    """
-    claimed = set(booth_cells_of(cfg, booth_id, x, y))
+    reception = reception_cell(
+        cfg,
+        booth_id,
+        x,
+        y,
+        theta,
+    )
 
-    reception = reception_cell(cfg, booth_id, x, y)
     if reception is not None:
         claimed.add(reception)
 
-    exit_cell = booth_exit_cell(cfg, booth_id, x, y)
+    exit_cell = booth_exit_cell(
+        cfg,
+        booth_id,
+        x,
+        y,
+        theta,
+    )
+
     if exit_cell is not None:
         claimed.add(exit_cell)
 
-    claimed.update(queue_cells_of(cfg, booth_id, x, y))
+    claimed.update(
+        queue_cells_of(
+            cfg,
+            booth_id,
+            x,
+            y,
+            theta,
+        )
+    )
+
     return claimed
 
 
-def _booth_fits(cfg, venue, occupied, booth_id, x, y) -> bool:
-    """候補座標 (x, y) が、会場のベースグリッド・所属広場・既配置ブースの
-    いずれとも衝突しないか判定する。
-
-    compute_violation の項目1〜5(幾何・所属広場制約)相当を、このブース
-    単体+既配置分についてだけ検査する軽量版。到達性(項目6〜8)は
-    全ブース配置後に compute_violation でまとめて検証する。
-    """
-    H, W = cfg.grid_height, cfg.grid_width
+def _booth_fits(
+    cfg,
+    venue,
+    occupied,
+    booth_id,
+    x,
+    y,
+    theta,
+) -> bool:
+    """候補状態 (x, y, theta) が幾何制約を満たすか判定する。"""
+    H = cfg.grid_height
+    W = cfg.grid_width
     base = venue.base_grid
 
     area = cfg.booths[booth_id].area
-    mask = venue.area_masks.get(area) if (venue.area_masks and area) else None
 
-    for (cx, cy) in booth_cells_of(cfg, booth_id, x, y):
-        if not (0 <= cx < W and 0 <= cy < H):
+    mask = (
+        venue.area_masks.get(area)
+        if venue.area_masks and area
+        else None
+    )
+
+    for cx, cy in booth_cells_of(
+        cfg,
+        booth_id,
+        x,
+        y,
+        theta,
+    ):
+        if not (
+            0 <= cx < W
+            and 0 <= cy < H
+        ):
             return False
+
         if base[cy, cx] != EMPTY:
             return False
-        if mask is not None and not mask[cy, cx]:
+
+        if (
+            mask is not None
+            and not mask[cy, cx]
+        ):
             return False
 
-    reception = reception_cell(cfg, booth_id, x, y)
+    reception = reception_cell(
+        cfg,
+        booth_id,
+        x,
+        y,
+        theta,
+    )
+
     if reception is not None:
         rx, ry = reception
-        if not (0 <= rx < W and 0 <= ry < H) or base[ry, rx] != EMPTY:
+
+        if (
+            not (
+                0 <= rx < W
+                and 0 <= ry < H
+            )
+            or base[ry, rx] != EMPTY
+        ):
             return False
 
-    exit_cell = booth_exit_cell(cfg, booth_id, x, y)
+    exit_cell = booth_exit_cell(
+        cfg,
+        booth_id,
+        x,
+        y,
+        theta,
+    )
+
     if exit_cell is not None:
         ex, ey = exit_cell
-        if not (0 <= ex < W and 0 <= ey < H) or base[ey, ex] != EMPTY:
+
+        if (
+            not (
+                0 <= ex < W
+                and 0 <= ey < H
+            )
+            or base[ey, ex] != EMPTY
+        ):
             return False
 
-    for (qx, qy) in queue_cells_of(cfg, booth_id, x, y):
-        if not (0 <= qx < W and 0 <= qy < H):
-            return False
-        if base[qy, qx] not in (EMPTY, FORBIDDEN):
+    for qx, qy in queue_cells_of(
+        cfg,
+        booth_id,
+        x,
+        y,
+        theta,
+    ):
+        if not (
+            0 <= qx < W
+            and 0 <= qy < H
+        ):
             return False
 
-    # ここまでの各セルは全て場内・許可種別であることを確認済みなので、
-    # 既配置ブースとの重複だけを追加でチェックすればよい。
-    for (cx, cy) in _booth_claimed_cells(cfg, booth_id, x, y):
+        if base[qy, qx] not in (
+            EMPTY,
+            FORBIDDEN,
+        ):
+            return False
+
+    for cx, cy in _booth_claimed_cells(
+        cfg,
+        booth_id,
+        x,
+        y,
+        theta,
+    ):
         if occupied[cy, cx]:
             return False
 
     return True
 
 
-def _greedy_layout_attempt(rng, cfg, venue, lower, upper, trials_per_booth):
-    """ブースを本体面積の大きい順(同面積はランダム順)に1個ずつ、
-    既配置分・会場と衝突しない座標へ配置する。
-
-    いずれかのブースで ``trials_per_booth`` 回試しても置き場所が
-    見つからなければ None を返す(呼び出し側で順序を変えて再試行する)。
-    """
+def _greedy_layout_attempt(
+    rng,
+    cfg,
+    venue,
+    lower,
+    upper,
+    trials_per_booth,
+):
+    """角度も含めて、ブースを1個ずつ実行可能位置へ配置する。"""
     n_booths = len(cfg.booths)
-    H, W = cfg.grid_height, cfg.grid_width
-    occupied = np.zeros((H, W), dtype=bool)
+    H = cfg.grid_height
+    W = cfg.grid_width
+
+    occupied = np.zeros(
+        (H, W),
+        dtype=bool,
+    )
 
     order = sorted(
         range(n_booths),
         key=lambda b: (
-            -(cfg.booths[b].width * cfg.booths[b].height),
+            -(
+                cfg.booths[b].width
+                * cfg.booths[b].height
+            ),
             rng.random(),
         ),
     )
 
-    layout = np.empty(n_booths * 2, dtype=np.int64)
+    layout = np.empty(
+        n_booths * 3,
+        dtype=np.int64,
+    )
 
     for booth_id in order:
-        xmin, xmax = int(lower[booth_id, 0]), int(upper[booth_id, 0])
-        ymin, ymax = int(lower[booth_id, 1]), int(upper[booth_id, 1])
-
         placed = False
-        for _ in range(trials_per_booth):
-            x = int(rng.integers(xmin, xmax + 1))
-            y = int(rng.integers(ymin, ymax + 1))
 
-            if _booth_fits(cfg, venue, occupied, booth_id, x, y):
-                for (cx, cy) in _booth_claimed_cells(cfg, booth_id, x, y):
+        for _ in range(trials_per_booth):
+            theta = int(
+                rng.integers(
+                    min(VALID_THETAS),
+                    max(VALID_THETAS) + 1,
+                )
+            )
+
+            xmin, xmax, ymin, ymax = position_bounds(
+                cfg,
+                booth_id,
+                theta,
+            )
+
+            xmin = max(
+                xmin,
+                int(lower[booth_id, 0]),
+            )
+
+            xmax = min(
+                xmax,
+                int(upper[booth_id, 0]),
+            )
+
+            ymin = max(
+                ymin,
+                int(lower[booth_id, 1]),
+            )
+
+            ymax = min(
+                ymax,
+                int(upper[booth_id, 1]),
+            )
+
+            if (
+                xmin > xmax
+                or ymin > ymax
+            ):
+                continue
+
+            x = int(
+                rng.integers(
+                    xmin,
+                    xmax + 1,
+                )
+            )
+
+            y = int(
+                rng.integers(
+                    ymin,
+                    ymax + 1,
+                )
+            )
+
+            if _booth_fits(
+                cfg,
+                venue,
+                occupied,
+                booth_id,
+                x,
+                y,
+                theta,
+            ):
+                for cx, cy in _booth_claimed_cells(
+                    cfg,
+                    booth_id,
+                    x,
+                    y,
+                    theta,
+                ):
                     occupied[cy, cx] = True
-                layout[2 * booth_id] = x
-                layout[2 * booth_id + 1] = y
+
+                base = 3 * booth_id
+
+                layout[base] = x
+                layout[base + 1] = y
+                layout[base + 2] = theta
+
                 placed = True
                 break
 
@@ -240,37 +460,55 @@ def sample_valid_layout(
     venue,
     max_trials=1000,
 ):
-    """有効配置を貪欲法でサンプリングする(1個体)。
-
-    ブースを1個ずつ、既配置分・会場と衝突しない座標へ配置していく方式。
-    46ブースのような多数のブースを一括で独立ランダム配置してから
-    まとめて棄却するリジェクションサンプリングは、ブース数が増えると
-    全て同時に成立する確率がほぼ0になり実用的でないため、
-    ブース単位で逐次検証する貪欲法に置き換えている。
-
-    全ブースを配置できたら、最後に到達性等を含む全制約を
-    compute_violation で検証する。配置順序の巡り合わせで失敗した
-    場合は、順序を変えて最初からやり直す。
-    """
+    """角度を含む有効配置を貪欲法でサンプリングする。"""
     n_booths = len(cfg.booths)
-    lower = np.asarray(lower_bounds, dtype=np.int64).reshape(n_booths, 2)
-    upper = np.asarray(upper_bounds, dtype=np.int64).reshape(n_booths, 2)
 
-    # ブースごとの候補探索回数は、ブース数で割って減らすと(46 ブースなど
-    # 多い場合に)1 ブースあたりの試行数が不足するため、ブース数に関係なく
-    # 十分な回数を確保する。max_trials はやり直し(配置順序の再抽選)回数
-    # の予算として使う。
-    trials_per_booth = max(150, max_trials // 10)
-    max_restarts = max(10, max_trials // trials_per_booth)
+    lower = np.asarray(
+        lower_bounds,
+        dtype=np.int64,
+    ).reshape(
+        n_booths,
+        3,
+    )
+
+    upper = np.asarray(
+        upper_bounds,
+        dtype=np.int64,
+    ).reshape(
+        n_booths,
+        3,
+    )
+
+    trials_per_booth = max(
+        150,
+        max_trials // 10,
+    )
+
+    max_restarts = max(
+        10,
+        max_trials // trials_per_booth,
+    )
 
     for _ in range(max_restarts):
-        layout = _greedy_layout_attempt(rng, cfg, venue, lower, upper, trials_per_booth)
+        layout = _greedy_layout_attempt(
+            rng,
+            cfg,
+            venue,
+            lower,
+            upper,
+            trials_per_booth,
+        )
+
         if layout is None:
             continue
 
         positions = to_integer_layout(layout)
 
-        if compute_violation(cfg, venue, positions) == 0:
+        if compute_violation(
+            cfg,
+            venue,
+            positions,
+        ) == 0:
             return layout
 
     raise RuntimeError(
@@ -280,19 +518,7 @@ def sample_valid_layout(
 
 
 class RandomValidBoothMutation(Mutation):
-    """個体内の複数ブースを、制約を満たす別位置へ移動する突然変異。
-
-    各個体について確率 ``prob`` で突然変異対象に選ぶ。
-    選ばれた個体では、各ブースについて確率 ``booth_prob`` で
-    移動を試みる。
-
-    1ブースの移動先候補はランダム順に最大
-    ``max_position_trials`` 個だけ確認し、最初に見つかった
-    実行可能座標を採用する。
-
-    最大試行回数以内に実行可能な座標が見つからない場合、
-    そのブースは変更しない。
-    """
+    """個体内の複数ブースを、実行可能な別の位置・角度へ変更する。"""
 
     def __init__(
         self,
@@ -302,8 +528,6 @@ class RandomValidBoothMutation(Mutation):
         max_position_trials: int = 100,
         seed: int = 1,
     ) -> None:
-        # pymooのMutation基底クラス側では全個体に_doを適用し、
-        # 個体単位・ブース単位の確率判定はこのクラス内で行う。
         super().__init__(prob=1.0)
 
         if not 0.0 <= prob <= 1.0:
@@ -325,23 +549,18 @@ class RandomValidBoothMutation(Mutation):
             )
 
         self.cfg = cfg
-
-        # 個体を突然変異対象にする確率。
         self.individual_prob = float(prob)
-
-        # 突然変異対象個体内で、
-        # 各ブースを移動対象にする確率。
         self.booth_prob = float(booth_prob)
 
-        # 各ブースの移動先候補を制約確認する最大回数。
-        self.max_position_trials = int(max_position_trials)
+        self.max_position_trials = int(
+            max_position_trials
+        )
 
-        # 制約判定に使用するベース会場。
         self.venue = build_base_venue(cfg)
 
-        # 古いpymooなど、_doへrandom_stateが渡らない場合に
-        # 使用する予備の乱数生成器。
-        self._fallback_rng = np.random.default_rng(seed)
+        self._fallback_rng = np.random.default_rng(
+            seed
+        )
 
     def _do(
         self,
@@ -356,10 +575,6 @@ class RandomValidBoothMutation(Mutation):
             else self._fallback_rng
         )
 
-        # SBX後は、整数値ではあるがfloat型になっている場合がある。
-        # 例：3.0、7.0
-        #
-        # to_integer_layout()へ渡せるように整数配列へ変換する。
         Y = np.rint(
             np.asarray(X)
         ).astype(
@@ -367,101 +582,93 @@ class RandomValidBoothMutation(Mutation):
             copy=True,
         )
 
-        lower = np.asarray(
-            problem.xl,
-            dtype=np.int64,
-        )
-
-        upper = np.asarray(
-            problem.xu,
-            dtype=np.int64,
-        )
-
         n_booths = len(self.cfg.booths)
 
         for individual_id in range(len(Y)):
-            # -----------------------------------------------------
-            # この個体を突然変異対象にするか判定
-            # -----------------------------------------------------
-            if float(rng.random()) >= self.individual_prob:
+            if (
+                float(rng.random())
+                >= self.individual_prob
+            ):
                 continue
 
-            # 1個体内で複数のブースを順次変更できるように、
-            # 成功した変更をcurrentへ保持する。
             current = Y[individual_id].copy()
-
-            # ブース番号の小さいものから常に処理すると偏りが生じるため、
-            # ブースの処理順をランダム化する。
             booth_order = rng.permutation(n_booths)
 
             for booth_id_raw in booth_order:
                 booth_id = int(booth_id_raw)
 
-                # -------------------------------------------------
-                # このブースを突然変異させるか独立に判定
-                # -------------------------------------------------
-                if float(rng.random()) >= self.booth_prob:
+                if (
+                    float(rng.random())
+                    >= self.booth_prob
+                ):
                     continue
 
-                x_index = 2 * booth_id
-                y_index = x_index + 1
+                base = 3 * booth_id
 
-                old_x = int(current[x_index])
-                old_y = int(current[y_index])
-
-                # -------------------------------------------------
-                # このブースが取り得る別座標を列挙
-                # -------------------------------------------------
-                candidate_positions = [
-                    (x_pos, y_pos)
-                    for x_pos in range(
-                        int(lower[x_index]),
-                        int(upper[x_index]) + 1,
-                    )
-                    for y_pos in range(
-                        int(lower[y_index]),
-                        int(upper[y_index]) + 1,
-                    )
-                    if (x_pos, y_pos) != (old_x, old_y)
-                ]
-
-                if not candidate_positions:
-                    # 別座標が存在しない場合は、このブースを変更しない。
-                    continue
-
-                # -------------------------------------------------
-                # 候補座標の確認回数を最大100回に制限
-                # -------------------------------------------------
-                n_trials = min(
-                    self.max_position_trials,
-                    len(candidate_positions),
+                old_state = tuple(
+                    int(v)
+                    for v in current[
+                        base:base + 3
+                    ]
                 )
 
-                candidate_order = rng.permutation(
-                    len(candidate_positions)
-                )[:n_trials]
+                for _ in range(
+                    self.max_position_trials
+                ):
+                    theta = int(
+                        rng.integers(
+                            min(VALID_THETAS),
+                            max(VALID_THETAS) + 1,
+                        )
+                    )
 
-                for candidate_id_raw in candidate_order:
-                    candidate_id = int(candidate_id_raw)
+                    xmin, xmax, ymin, ymax = (
+                        position_bounds(
+                            self.cfg,
+                            booth_id,
+                            theta,
+                        )
+                    )
 
-                    new_x, new_y = candidate_positions[
-                        candidate_id
-                    ]
+                    if (
+                        xmin > xmax
+                        or ymin > ymax
+                    ):
+                        continue
 
-                    # それまでに成功した他ブースの突然変異も含む
-                    # currentをコピーして候補個体を生成する。
+                    new_x = int(
+                        rng.integers(
+                            xmin,
+                            xmax + 1,
+                        )
+                    )
+
+                    new_y = int(
+                        rng.integers(
+                            ymin,
+                            ymax + 1,
+                        )
+                    )
+
+                    new_state = (
+                        new_x,
+                        new_y,
+                        theta,
+                    )
+
+                    if new_state == old_state:
+                        continue
+
                     candidate = current.copy()
 
-                    candidate[x_index] = new_x
-                    candidate[y_index] = new_y
+                    candidate[
+                        base:base + 3
+                    ] = new_state
 
                     positions = to_integer_layout(
                         candidate
                     )
 
-                    # ---------------------------------------------
-                    # 配置全体が全制約を満たす場合だけ採用
-                    # ---------------------------------------------
                     if compute_violation(
                         self.cfg,
                         self.venue,
@@ -470,13 +677,6 @@ class RandomValidBoothMutation(Mutation):
                         current = candidate
                         break
 
-                # 最大100候補を確認しても実行可能座標が
-                # 見つからなかった場合、currentは変更されない。
-                #
-                # その場合も個体全体の突然変異は中断せず、
-                # 次のブースの突然変異判定へ進む。
-
-            # 複数ブースの突然変異結果を個体へ反映する。
             Y[individual_id] = current
 
         return Y
@@ -484,13 +684,13 @@ class RandomValidBoothMutation(Mutation):
 class MemeticNSGA2(NSGA2):
     """5世代ごとに基本近傍探索を行うNSGA-II。"""
 
-    # 基本近傍：
-    # 1個のブースを上下左右へ1セルだけ移動する。
     BASIC_MOVES = (
-        (1, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
     )
 
     def __init__(
@@ -698,11 +898,12 @@ class MemeticNSGA2(NSGA2):
                 booth_id,
                 dx,
                 dy,
+                dtheta,
             )
             for booth_id in range(
                 len(self.cfg.booths)
             )
-            for dx, dy in self.BASIC_MOVES
+            for dx, dy, dtheta in self.BASIC_MOVES
         ]
 
         neighbors: list[np.ndarray] = []
@@ -718,12 +919,13 @@ class MemeticNSGA2(NSGA2):
                 move_id_raw
             )
 
-            booth_id, dx, dy = moves[
+            booth_id, dx, dy, dtheta = moves[
                 move_id
             ]
 
-            x_index = 2 * booth_id
+            x_index = 3 * booth_id
             y_index = x_index + 1
+            theta_index = x_index + 2
 
             new_x = (
                 int(original[x_index])
@@ -735,7 +937,11 @@ class MemeticNSGA2(NSGA2):
                 + dy
             )
 
-            # 設計変数の上下限を超える移動は棄却する。
+            new_theta = (
+                int(original[theta_index])
+                + dtheta
+            ) % 4
+
             if not (
                 int(lower[x_index])
                 <= new_x
@@ -750,6 +956,7 @@ class MemeticNSGA2(NSGA2):
 
             candidate[x_index] = new_x
             candidate[y_index] = new_y
+            candidate[theta_index] = new_theta
 
             key = tuple(
                 int(value)

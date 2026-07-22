@@ -34,7 +34,11 @@ from .models import (
 )
 from .rng import decision_rng, softmax_choice, tiebreak_rng
 from .routing import astar, bfs_distance_field, descend_path
-from .venue import Layout, Venue
+from .venue import (
+    Layout,
+    Venue,
+    booth_cells_of,
+)
 from .visitors import instantiate_visitors
 
 
@@ -170,17 +174,36 @@ class Simulation:
             for cell in qcells:
                 add_cell(cell)
 
-        # layout.positions がある場合はブース本体セルも代表点に含める。
-        # 座標系は本実装内の他処理に合わせて (x, y) として扱う。
-        for b, pos in enumerate(getattr(self.layout, "positions", [])):
+        # 角度を反映したブース本体セルも代表点に含める。
+        for b, pos in enumerate(
+            getattr(
+                self.layout,
+                "positions",
+                [],
+            )
+        ):
             if b >= len(cfg.booths):
                 break
-            spec = cfg.booths[b]
-            x0, y0 = int(round(pos[0])), int(round(pos[1]))
-            for y in range(y0, y0 + spec.height):
-                for x in range(x0, x0 + spec.width):
-                    if 0 <= x < W and 0 <= y < H:
-                        booth_related.add((x, y))
+
+            bx, by, theta = (
+                int(v)
+                for v in pos
+            )
+
+            for x, y in booth_cells_of(
+                cfg,
+                b,
+                bx,
+                by,
+                theta,
+            ):
+                if (
+                    0 <= x < W
+                    and 0 <= y < H
+                ):
+                    booth_related.add(
+                        (x, y)
+                    )
 
         if not booth_related:
             return weights
