@@ -17,6 +17,92 @@ from .models import (
     Config,
 )
 
+# theta は北から時計回りの方向コードとする。
+THETA_NORTH = 0
+THETA_EAST = 1
+THETA_SOUTH = 2
+THETA_WEST = 3
+
+VALID_THETAS = (
+    THETA_NORTH,
+    THETA_EAST,
+    THETA_SOUTH,
+    THETA_WEST,
+)
+
+THETA_LABELS = {
+    THETA_NORTH: "north",
+    THETA_EAST: "east",
+    THETA_SOUTH: "south",
+    THETA_WEST: "west",
+}
+
+THETA_ARROWS = {
+    THETA_NORTH: "↑",
+    THETA_EAST: "→",
+    THETA_SOUTH: "↓",
+    THETA_WEST: "←",
+}
+
+
+def _validate_theta(theta: int) -> int:
+    theta = int(theta)
+
+    if theta not in VALID_THETAS:
+        raise ValueError(
+            f"theta must be one of {VALID_THETAS}: "
+            f"{theta}"
+        )
+
+    return theta
+
+
+def oriented_booth_size(
+    cfg: Config,
+    booth_id: int,
+    theta: int,
+) -> tuple[int, int]:
+    """向きを反映したブース本体の (幅, 高さ) を返す。"""
+    theta = _validate_theta(theta)
+    spec = cfg.booths[booth_id]
+
+    if theta in (
+        THETA_NORTH,
+        THETA_SOUTH,
+    ):
+        return spec.width, spec.height
+
+    return spec.height, spec.width
+
+
+def _rotate_relative_cell(
+    spec,
+    x: int,
+    y: int,
+    theta: int,
+) -> tuple[int, int]:
+    """南向きを基準にした相対セルを、指定方向へ回転する。
+
+    入力の相対座標はブース本体の左上を (0, 0) とする。
+    受付・退出口・待機列のような本体外セルにも同じ変換を適用できる。
+    回転後も、回転したブース本体の左上が (0, 0) になる。
+    """
+    theta = _validate_theta(theta)
+
+    w = int(spec.width)
+    h = int(spec.height)
+
+    if theta == THETA_SOUTH:
+        return x, y
+
+    if theta == THETA_EAST:
+        return y, w - 1 - x
+
+    if theta == THETA_NORTH:
+        return w - 1 - x, h - 1 - y
+
+    return h - 1 - y, x
+
 
 @dataclass(frozen=True)
 class Venue:
@@ -36,7 +122,7 @@ class Layout:
     grid: np.ndarray              # int8 (H, W) セル種別(BOOTH/QUEUE 反映済み)
     capacity: np.ndarray          # int8 (H, W)
     walkable: np.ndarray          # bool (H, W)
-    positions: tuple              # ((booth_x, booth_y), ...) 左上基準(§3.5)
+    positions: tuple              # ((booth_x, booth_y, theta), ...) 回転後左上基準
     receptions: tuple             # ブースごとの受付セル (x, y)(§5.1)
     booth_exits: tuple             # ブース体験後に再出現するセル (x, y)
     queue_cells: tuple            # ブースごとの待ち行列セル列 ((x,y),...)(§5.2)
@@ -170,69 +256,274 @@ def build_base_venue(cfg: Config) -> Venue:
     )
 
 
-def reception_cell(cfg: Config, booth_id: int, bx: int, by: int) -> tuple[int, int] | None:
-    """設定されたブース受付セルを返す。テーブルは受付を持たない(None)。"""
+def _south_reception_relative(
+    cfg: Config,
+    booth_id: int,
+) -> tuple[int, int] | None:
+    """南向きを基準にした受付セルの相対座標を返す。"""
     spec = cfg.booths[booth_id]
+
     if spec.is_table:
         return None
+
     if cfg.reception_position == "bottom_center":
-        return (bx + spec.width // 2, by + spec.height)
+        return (
+            spec.width // 2,
+            spec.height,
+        )
+
     if cfg.reception_position == "bottom_left":
-        return (bx, by + spec.height)
-    raise ValueError(f"unsupported reception_position: {cfg.reception_position!r}")
+        return (
+            0,
+            spec.height,
+        )
+
+    raise ValueError(
+        "unsupported reception_position: "
+        f"{cfg.reception_position!r}"
+    )
 
 
-def booth_exit_cell(cfg: Config, booth_id: int, bx: int, by: int) -> tuple[int, int] | None:
-    """設定されたブース体験後の退出セルを返す。テーブルは持たない(None)。"""
-    if cfg.booths[booth_id].is_table:
+def reception_cell(
+    cfg: Config,
+    booth_id: int,
+    bx: int,
+    by: int,
+    theta: int,
+) -> tuple[int, int] | None:
+    """角度を反映したブース受付セルを返す。テーブルは None。"""
+    relative = _south_reception_relative(
+        cfg,
+        booth_id,
+    )
+
+    if relative is None:
         return None
-    if cfg.booth_exit_position == "reception":
-        return reception_cell(cfg, booth_id, bx, by)
-    if cfg.booth_exit_position == "top_left":
-        return (bx, by - 1)
-    raise ValueError(f"unsupported exit_position: {cfg.booth_exit_position!r}")
+
+    rx, ry = _rotate_relative_cell(
+        cfg.booths[booth_id],
+        relative[0],
+        relative[1],
+        theta,
+    )
+
+    return (
+        bx + rx,
+        by + ry,
+    )
 
 
-def queue_cells_of(cfg: Config, booth_id: int, bx: int, by: int) -> tuple[tuple[int, int], ...]:
-    """受付側を先頭として、設定された形状の待ち行列セル列を返す。
-
-    テーブルは待ち行列を持たないため空を返す。
-    """
+def booth_exit_cell(
+    cfg: Config,
+    booth_id: int,
+    bx: int,
+    by: int,
+    theta: int,
+) -> tuple[int, int] | None:
+    """角度を反映した体験後退出セルを返す。テーブルは None。"""
     spec = cfg.booths[booth_id]
+
+    if spec.is_table:
+        return None
+
+    if cfg.booth_exit_position == "reception":
+        return reception_cell(
+            cfg,
+            booth_id,
+            bx,
+            by,
+            theta,
+        )
+
+    if cfg.booth_exit_position == "top_left":
+        relative = (0, -1)
+    else:
+        raise ValueError(
+            "unsupported exit_position: "
+            f"{cfg.booth_exit_position!r}"
+        )
+
+    ex, ey = _rotate_relative_cell(
+        spec,
+        relative[0],
+        relative[1],
+        theta,
+    )
+
+    return (
+        bx + ex,
+        by + ey,
+    )
+
+
+def queue_cells_of(
+    cfg: Config,
+    booth_id: int,
+    bx: int,
+    by: int,
+    theta: int,
+) -> tuple[tuple[int, int], ...]:
+    """受付側を先頭として、角度を反映した待ち行列セル列を返す。"""
+    spec = cfg.booths[booth_id]
+
     if spec.is_table:
         return ()
-    ex, ey = reception_cell(cfg, booth_id, bx, by)
+
+    reception_relative = _south_reception_relative(
+        cfg,
+        booth_id,
+    )
+
+    assert reception_relative is not None
+
     if cfg.queue_pattern == "straight_down":
-        return tuple((ex, ey + 1 + k) for k in range(spec.max_queue_length))
-    if cfg.queue_pattern == "bottom_then_right":
-        # ブース下辺を左→右、その後に右辺を下→上へ並ぶ L 字。
-        # 左下の受付セルは到着・入場処理専用とし、待機列には含めない。
-        cells = [(bx + dx, by + spec.height) for dx in range(spec.width)]
-        cells.append((bx + spec.width, by + spec.height))
-        cells.extend(
-            (bx + spec.width, y)
-            for y in range(by + spec.height - 1, by - 1, -1)
+        south_cells = [
+            (
+                reception_relative[0],
+                reception_relative[1] + 1 + k,
+            )
+            for k in range(
+                spec.max_queue_length
+            )
+        ]
+
+    elif cfg.queue_pattern == "bottom_then_right":
+        # 南向き時のL字形状を作成後、ブース角度に合わせて回転する。
+        cells = [
+            (dx, spec.height)
+            for dx in range(spec.width)
+        ]
+
+        cells.append(
+            (
+                spec.width,
+                spec.height,
+            )
         )
-        dedicated_cells = (cell for cell in dict.fromkeys(cells) if cell != (ex, ey))
-        return tuple(dedicated_cells)[: spec.max_queue_length]
-    raise ValueError(f"unsupported queue_pattern: {cfg.queue_pattern!r}")
+
+        cells.extend(
+            (
+                spec.width,
+                y,
+            )
+            for y in range(
+                spec.height - 1,
+                -1,
+                -1,
+            )
+        )
+
+        south_cells = [
+            cell
+            for cell in dict.fromkeys(cells)
+            if cell != reception_relative
+        ][:spec.max_queue_length]
+
+    else:
+        raise ValueError(
+            "unsupported queue_pattern: "
+            f"{cfg.queue_pattern!r}"
+        )
+
+    rotated = [
+        _rotate_relative_cell(
+            spec,
+            x,
+            y,
+            theta,
+        )
+        for x, y in south_cells
+    ]
+
+    return tuple(
+        (
+            bx + x,
+            by + y,
+        )
+        for x, y in rotated
+    )
 
 
-def booth_cells_of(cfg: Config, booth_id: int, bx: int, by: int) -> list[tuple[int, int]]:
-    """ブース占有セル(§3.5)。会場外セルも含めてそのまま返す(制約チェック用)。"""
-    spec = cfg.booths[booth_id]
-    return [(x, y) for y in range(by, by + spec.height) for x in range(bx, bx + spec.width)]
+def booth_cells_of(
+    cfg: Config,
+    booth_id: int,
+    bx: int,
+    by: int,
+    theta: int,
+) -> list[tuple[int, int]]:
+    """角度を反映したブース本体の占有セルを返す。"""
+    width, height = oriented_booth_size(
+        cfg,
+        booth_id,
+        theta,
+    )
+
+    return [
+        (x, y)
+        for y in range(
+            by,
+            by + height,
+        )
+        for x in range(
+            bx,
+            bx + width,
+        )
+    ]
 
 
-def position_bounds(cfg: Config, booth_id: int) -> tuple[int, int, int, int]:
-    """ブース本体・受付・退出・待機列が場内に収まる左上座標の上下限。"""
-    cells = booth_cells_of(cfg, booth_id, 0, 0)
-    for aux in (reception_cell(cfg, booth_id, 0, 0), booth_exit_cell(cfg, booth_id, 0, 0)):
+def position_bounds(
+    cfg: Config,
+    booth_id: int,
+    theta: int,
+) -> tuple[int, int, int, int]:
+    """指定角度で本体・受付・退出・待機列が場内に収まる座標範囲。"""
+    cells = booth_cells_of(
+        cfg,
+        booth_id,
+        0,
+        0,
+        theta,
+    )
+
+    for aux in (
+        reception_cell(
+            cfg,
+            booth_id,
+            0,
+            0,
+            theta,
+        ),
+        booth_exit_cell(
+            cfg,
+            booth_id,
+            0,
+            0,
+            theta,
+        ),
+    ):
         if aux is not None:
             cells.append(aux)
-    cells += list(queue_cells_of(cfg, booth_id, 0, 0))
-    xs = [x for x, _ in cells]
-    ys = [y for _, y in cells]
+
+    cells += list(
+        queue_cells_of(
+            cfg,
+            booth_id,
+            0,
+            0,
+            theta,
+        )
+    )
+
+    xs = [
+        x
+        for x, _ in cells
+    ]
+
+    ys = [
+        y
+        for _, y in cells
+    ]
+
     return (
         -min(xs),
         cfg.grid_width - 1 - max(xs),
@@ -241,35 +532,84 @@ def position_bounds(cfg: Config, booth_id: int) -> tuple[int, int, int, int]:
     )
 
 
-def apply_layout(cfg: Config, venue: Venue, positions: tuple) -> Layout:
-    """有効(制約充足済み)配置をグリッドへ適用する。
-
-    前提: constraints.compute_violation() で g == 0 が確認済みであること。
-    """
+def apply_layout(
+    cfg: Config,
+    venue: Venue,
+    positions: tuple,
+) -> Layout:
+    """有効な ``((x, y, theta), ...)`` 配置をグリッドへ適用する。"""
     grid = venue.base_grid.copy()
     capacity = venue.base_capacity.copy()
+
     receptions = []
     booth_exits = []
     queue_cells = []
-    for bid, (bx, by) in enumerate(positions):
-        spec = cfg.booths[bid]
-        grid[by : by + spec.height, bx : bx + spec.width] = BOOTH
-        receptions.append(reception_cell(cfg, bid, bx, by))   # テーブルは None
-        booth_exits.append(booth_exit_cell(cfg, bid, bx, by))
-        qcells = queue_cells_of(cfg, bid, bx, by)
+
+    for bid, (
+        bx,
+        by,
+        theta,
+    ) in enumerate(positions):
+
+        for x, y in booth_cells_of(
+            cfg,
+            bid,
+            bx,
+            by,
+            theta,
+        ):
+            grid[y, x] = BOOTH
+
+        receptions.append(
+            reception_cell(
+                cfg,
+                bid,
+                bx,
+                by,
+                theta,
+            )
+        )
+
+        booth_exits.append(
+            booth_exit_cell(
+                cfg,
+                bid,
+                bx,
+                by,
+                theta,
+            )
+        )
+
+        qcells = queue_cells_of(
+            cfg,
+            bid,
+            bx,
+            by,
+            theta,
+        )
+
         queue_cells.append(qcells)
-        for (qx, qy) in qcells:
+
+        for qx, qy in qcells:
             grid[qy, qx] = QUEUE
             capacity[qy, qx] = cfg.cap_queue
 
-    walkable = np.isin(grid, WALKABLE_TYPES)
+    walkable = np.isin(
+        grid,
+        WALKABLE_TYPES,
+    )
+
     if not cfg.queue_walkable:
         walkable[grid == QUEUE] = False
+
     return Layout(
         grid=grid,
         capacity=capacity,
         walkable=walkable,
-        positions=tuple(tuple(p) for p in positions),
+        positions=tuple(
+            tuple(p)
+            for p in positions
+        ),
         receptions=tuple(receptions),
         booth_exits=tuple(booth_exits),
         queue_cells=tuple(queue_cells),

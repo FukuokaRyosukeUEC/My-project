@@ -19,23 +19,24 @@ from .venue import (
     booth_exit_cell,
     queue_cells_of,
     reception_cell,
+    VALID_THETAS,
 )
 
 REACHABILITY_PENALTY = 100.0
 
 
-def to_integer_layout(x: np.ndarray) -> tuple[tuple[int, int], ...]:
-    """整数の設計ベクトルを ((x1, y1), ..., (xn, yn)) に変換する。
+def to_integer_layout(x: np.ndarray) -> tuple[tuple[int, int, int], ...]:
+    """整数設計ベクトルを ``((x1, y1, theta1), ...)`` に変換する。
 
-    小数を暗黙に丸めない。
-    小数成分が含まれていれば、最適化演算子の整数化設定が
-    適用されていないものとして ValueError を発生させる。
+    theta は ``0=北, 1=東, 2=南, 3=西`` とする。
+    小数は暗黙に丸めず、含まれていれば ValueError を発生させる。
     """
     values = np.asarray(x)
 
-    if values.size % 2 != 0:
+    if values.size % 3 != 0:
         raise ValueError(
-            f"design vector length must be even: {values.size}"
+            "design vector length must be a multiple of 3: "
+            f"{values.size}"
         )
 
     if not np.all(np.isfinite(values)):
@@ -45,8 +46,6 @@ def to_integer_layout(x: np.ndarray) -> tuple[tuple[int, int], ...]:
 
     rounded = np.rint(values)
 
-    # 3.0 のような整数値の浮動小数点表現は許可するが、
-    # 3.2 のような実際の小数値は許可しない。
     if not np.allclose(
         values,
         rounded,
@@ -58,14 +57,30 @@ def to_integer_layout(x: np.ndarray) -> tuple[tuple[int, int], ...]:
             f"fractional values were found: {values}"
         )
 
-    pairs = rounded.astype(
+    triples = rounded.astype(
         np.int64,
         copy=False,
-    ).reshape(-1, 2)
+    ).reshape(-1, 3)
+
+    invalid_theta = [
+        int(theta)
+        for theta in triples[:, 2]
+        if int(theta) not in VALID_THETAS
+    ]
+
+    if invalid_theta:
+        raise ValueError(
+            f"theta must be one of {VALID_THETAS}: "
+            f"{invalid_theta}"
+        )
 
     return tuple(
-        (int(x_pos), int(y_pos))
-        for x_pos, y_pos in pairs
+        (
+            int(x_pos),
+            int(y_pos),
+            int(theta),
+        )
+        for x_pos, y_pos, theta in triples
     )
 
 
