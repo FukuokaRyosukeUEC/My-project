@@ -15,6 +15,7 @@ import pandas as pd
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.callback import Callback
 from pymoo.core.mutation import Mutation
+from pymoo.core.population import Population
 from pymoo.core.problem import ElementwiseProblem
 from pymoo.core.sampling import Sampling
 from pymoo.operators.crossover.sbx import SBX
@@ -450,6 +451,403 @@ class RandomValidBoothMutation(Mutation):
             # Y[individual_id]は元の配置のままになる。
 
         return Y
+
+class MemeticNSGA2(NSGA2):
+    """5世代ごとに基本近傍探索を行うNSGA-II。"""
+
+    # 基本近傍：
+    # 1個のブースを上下左右へ1セルだけ移動する。
+    BASIC_MOVES = (
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+    )
+
+    def __init__(
+        self,
+        cfg: Config,
+        local_search_interval: int = 5,
+        n_dominated_parents: int = 3,
+        n_random_parents: int = 5,
+        n_neighbors_per_parent: int = 2,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        self.cfg = cfg
+
+        # 5世代に1回、局所探索を行う。
+        self.local_search_interval = int(
+            local_search_interval
+        )
+
+        # 被支配解から選択する親の数。
+        self.n_dominated_parents = int(
+            n_dominated_parents
+        )
+
+        # 集団からランダムに選択する親の数。
+        self.n_random_parents = int(
+            n_random_parents
+        )
+
+        # 1親から生成・評価する近傍個体の最大数。
+        self.n_neighbors_per_parent = int(
+            n_neighbors_per_parent
+        )
+
+        # 近傍配置の制約判定に使うベース会場。
+        self.local_search_venue = build_base_venue(
+            cfg
+        )
+
+    def _post_advance(self) -> None:
+        """通常のNSGA-II更新後、指定世代だけ局所探索を行う。"""
+
+        if (
+            self.pop is not None
+            and self.n_gen is not None
+            and self.n_gen % self.local_search_interval == 0
+        ):
+            self._apply_local_search()
+
+        # 局所探索後の集団を使って、
+        # optimum、終了判定、callbackを更新する。
+        super()._post_advance()
+
+    def _select_parent_indices(
+        self,
+    ) -> np.ndarray:
+        """局所探索を適用する親個体を選択する。
+
+        選択内容：
+        ・被支配解から最大3個体
+        ・残りの実行可能解からランダムに最大5個体
+
+        被支配解として選択済みの個体は、
+        ランダム選択側では重複選択しない。
+        """
+
+        if self.pop is None or len(self.pop) == 0:
+            return np.empty(
+                0,
+                dtype=np.int64,
+            )
+
+        # 実行可能性。
+        feasible = np.asarray(
+            self.pop.get("FEAS"),
+            dtype=bool,
+        ).reshape(-1)
+
+        # NSGA-IIの非支配ランク。
+        rank = np.asarray(
+            self.pop.get("rank"),
+            dtype=float,
+        ).reshape(-1)
+
+        # 目的関数値。
+        F = np.asarray(
+            self.pop.get("F"),
+            dtype=float,
+        )
+
+        # 実行可能かつ目的関数値が有限である個体だけを対象にする。
+        feasible_indices = np.where(
+            feasible
+            & np.all(
+                np.isfinite(F),
+                axis=1,
+            )
+        )[0]
+
+        if feasible_indices.size == 0:
+            return np.empty(
+                0,
+                dtype=np.int64,
+            )
+
+        # NSGA-IIでは、
+        # rank == 0：非支配解
+        # rank > 0 ：被支配解
+        dominated_indices = feasible_indices[
+            rank[feasible_indices] > 0
+        ]
+
+        # ---------------------------------------------------------
+        # 被支配解から最大3個体
+        # ---------------------------------------------------------
+        n_dominated = min(
+            self.n_dominated_parents,
+            dominated_indices.size,
+        )
+
+        if n_dominated > 0:
+            selected_dominated = np.asarray(
+                self.random_state.choice(
+                    dominated_indices,
+                    size=n_dominated,
+                    replace=False,
+                ),
+                dtype=np.int64,
+            )
+        else:
+            selected_dominated = np.empty(
+                0,
+                dtype=np.int64,
+            )
+
+        # ---------------------------------------------------------
+        # 残りの実行可能解からランダムに最大5個体
+        # ---------------------------------------------------------
+        random_pool = np.setdiff1d(
+            feasible_indices,
+            selected_dominated,
+            assume_unique=False,
+        )
+
+        n_random = min(
+            self.n_random_parents,
+            random_pool.size,
+        )
+
+        if n_random > 0:
+            selected_random = np.asarray(
+                self.random_state.choice(
+                    random_pool,
+                    size=n_random,
+                    replace=False,
+                ),
+                dtype=np.int64,
+            )
+        else:
+            selected_random = np.empty(
+                0,
+                dtype=np.int64,
+            )
+
+        return np.concatenate(
+            (
+                selected_dominated,
+                selected_random,
+            )
+        )
+
+    def _generate_basic_neighbors(
+        self,
+        parent_x: np.ndarray,
+        known_layouts: set[tuple[int, ...]],
+    ) -> list[np.ndarray]:
+        """基本近傍から実行可能な個体を最大2個生成する。
+
+        基本近傍：
+        1個のブースだけを上下左右へ1セル移動した配置。
+
+        実行可能な基本近傍が1個も存在しない場合は、
+        空リストを返して、その親の局所探索を終了する。
+        """
+
+        original = np.asarray(
+            parent_x,
+            dtype=np.int64,
+        ).copy()
+
+        lower = np.asarray(
+            self.problem.xl,
+            dtype=np.int64,
+        )
+
+        upper = np.asarray(
+            self.problem.xu,
+            dtype=np.int64,
+        )
+
+        # 全ブースについて、上下左右への1セル移動を列挙する。
+        moves = [
+            (
+                booth_id,
+                dx,
+                dy,
+            )
+            for booth_id in range(
+                len(self.cfg.booths)
+            )
+            for dx, dy in self.BASIC_MOVES
+        ]
+
+        neighbors: list[np.ndarray] = []
+
+        # 特定ブースや特定方向へ偏らないように、
+        # 基本近傍をランダム順に確認する。
+        move_order = self.random_state.permutation(
+            len(moves)
+        )
+
+        for move_id_raw in move_order:
+            move_id = int(
+                move_id_raw
+            )
+
+            booth_id, dx, dy = moves[
+                move_id
+            ]
+
+            x_index = 2 * booth_id
+            y_index = x_index + 1
+
+            new_x = (
+                int(original[x_index])
+                + dx
+            )
+
+            new_y = (
+                int(original[y_index])
+                + dy
+            )
+
+            # 設計変数の上下限を超える移動は棄却する。
+            if not (
+                int(lower[x_index])
+                <= new_x
+                <= int(upper[x_index])
+                and int(lower[y_index])
+                <= new_y
+                <= int(upper[y_index])
+            ):
+                continue
+
+            candidate = original.copy()
+
+            candidate[x_index] = new_x
+            candidate[y_index] = new_y
+
+            key = tuple(
+                int(value)
+                for value in candidate
+            )
+
+            # 現集団または今回生成済みの配置と
+            # 同一なら評価しない。
+            if key in known_layouts:
+                continue
+
+            positions = to_integer_layout(
+                candidate
+            )
+
+            # 全制約を満たさない基本近傍は評価しない。
+            if compute_violation(
+                self.cfg,
+                self.local_search_venue,
+                positions,
+            ) != 0:
+                continue
+
+            neighbors.append(
+                candidate
+            )
+
+            known_layouts.add(
+                key
+            )
+
+            # 各親から評価する近傍は最大2個。
+            if (
+                len(neighbors)
+                >= self.n_neighbors_per_parent
+            ):
+                break
+
+        # ここが空なら、その親については
+        # 局所探索を行わない。
+        return neighbors
+
+    def _apply_local_search(
+        self,
+    ) -> None:
+        """近傍個体を評価し、NSGA-IIの環境選択を再適用する。"""
+
+        parent_indices = (
+            self._select_parent_indices()
+        )
+
+        if parent_indices.size == 0:
+            return
+
+        current_X = np.asarray(
+            self.pop.get("X"),
+            dtype=np.int64,
+        )
+
+        # 現在集団との重複を防止する。
+        known_layouts = {
+            tuple(
+                int(value)
+                for value in row
+            )
+            for row in current_X
+        }
+
+        neighbor_vectors: list[
+            np.ndarray
+        ] = []
+
+        # 選択された各親から、最大2個の近傍を生成する。
+        for parent_index_raw in parent_indices:
+            parent_index = int(
+                parent_index_raw
+            )
+
+            parent_neighbors = (
+                self._generate_basic_neighbors(
+                    current_X[parent_index],
+                    known_layouts,
+                )
+            )
+
+            # 実行可能近傍が0個なら、
+            # extendされず、その親の探索は終了する。
+            neighbor_vectors.extend(
+                parent_neighbors
+            )
+
+        if not neighbor_vectors:
+            return
+
+        # 近傍個体をpymooのPopulationへ変換する。
+        local_pop = Population.new(
+            "X",
+            np.asarray(
+                neighbor_vectors,
+                dtype=np.int64,
+            ),
+        )
+
+        # LayoutProblemへ設定されている
+        # elementwise_runnerを使って一括評価する。
+        # workers > 1なら既存の並列評価がそのまま使われる。
+        self.evaluator.eval(
+            self.problem,
+            local_pop,
+            algorithm=self,
+        )
+
+        # 現在集団と近傍個体を統合する。
+        merged = Population.merge(
+            self.pop,
+            local_pop,
+        )
+
+        # NSGA-IIの非支配ランクと混雑距離を用いて、
+        # pop_size個へ戻す。
+        self.pop = self.survival.do(
+            self.problem,
+            merged,
+            n_survive=self.pop_size,
+            algorithm=self,
+            random_state=self.random_state,
+        )
     
 class ObjectiveHistoryCallback(Callback):
     """各世代の環境選択後集団の目的関数値と制約値を保存する。"""
@@ -812,16 +1210,52 @@ def run_nsga2(
     elementwise_runner=None,
     seed: int = 1,
     verbose: bool = True,
-    mutation_prob: float = 0.2, # 突然変異率
+    mutation_prob: float = 0.2,
 ):
-    """NSGA-II を実行し pymoo の Result を返す。"""
+    """近傍探索付きNSGA-IIを実行し、pymooのResultを返す。"""
+
     kwargs = {}
+
     if elementwise_runner is not None:
-        kwargs["elementwise_runner"] = elementwise_runner
-    problem = LayoutProblem(cfg, **kwargs)
-    algorithm = NSGA2(
-        pop_size=pop_size or cfg.population_size,
-        sampling=ValidLayoutSampling(cfg),
+        kwargs["elementwise_runner"] = (
+            elementwise_runner
+        )
+
+    problem = LayoutProblem(
+        cfg,
+        **kwargs,
+    )
+
+    algorithm = MemeticNSGA2(
+        cfg=cfg,
+
+        # ---------------------------------------------------------
+        # Memetic Algorithm設定
+        # ---------------------------------------------------------
+
+        # 5世代に1回、局所探索する。
+        local_search_interval=5,
+
+        # 被支配解から3個体選択する。
+        n_dominated_parents=3,
+
+        # 残りの実行可能解からランダムに5個体選択する。
+        n_random_parents=5,
+
+        # 各親から評価する実行可能近傍は最大2個。
+        n_neighbors_per_parent=2,
+
+        # ---------------------------------------------------------
+        # 通常のNSGA-II設定
+        # ---------------------------------------------------------
+        pop_size=(
+            pop_size
+            or cfg.population_size
+        ),
+
+        sampling=ValidLayoutSampling(
+            cfg
+        ),
 
         # SBX自体の計算は実数空間で行い、
         # 生成直後に整数へ修復する。
@@ -832,34 +1266,42 @@ def run_nsga2(
             repair=RoundingRepair(),
         ),
 
-        # 1個のブースだけを、配置全体が制約を満たす
-        # 別位置へランダムに移動する突然変異。
+        # 大域的な探索を担当する突然変異。
+        # 1個のブースを、配置全体が制約を満たす
+        # 別位置へランダムに移動する。
         mutation=RandomValidBoothMutation(
             cfg=cfg,
             prob=mutation_prob,
             seed=seed,
         ),
 
-        # 整数化後に同じ設計ベクトルとなった個体を除去する。
+        # 同じ整数設計ベクトルとなった個体を除去する。
         eliminate_duplicates=True,
     )
 
-    # 各世代の目的関数値と制約値を記録する
-    history_callback = ObjectiveHistoryCallback()
+    # 各世代の目的関数値と制約値を記録する。
+    history_callback = (
+        ObjectiveHistoryCallback()
+    )
 
     res = minimize(
         problem,
         algorithm,
-        ("n_gen", n_gen or cfg.n_generations),
+        (
+            "n_gen",
+            n_gen
+            or cfg.n_generations,
+        ),
         seed=seed,
         verbose=verbose,
         callback=history_callback,
         save_history=False,
     )
 
-    # pymooのalgorithm履歴全体は保存せず、
-    # HV計算に必要なFとGだけをResultへ付加する。
-    res.objective_history = history_callback.records
+    # HV計算に必要な目的関数値と制約値だけを保存する。
+    res.objective_history = (
+        history_callback.records
+    )
 
     return res
 
