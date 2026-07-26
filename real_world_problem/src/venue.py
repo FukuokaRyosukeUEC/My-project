@@ -260,7 +260,12 @@ def _south_reception_relative(
     cfg: Config,
     booth_id: int,
 ) -> tuple[int, int] | None:
-    """南向きを基準にした受付セルの相対座標を返す。"""
+    """南向きを基準にした受付セルの相対座標を返す。
+
+    受付・待機列・退出は常にブース本体の南辺(theta 回転前の正面)に配置する。
+    ブースの正面方向は theta で表現するため、この関数自体はアスペクト比に
+    依存しない(theta と正面方向を一致させるため)。
+    """
     spec = cfg.booths[booth_id]
 
     if spec.is_table:
@@ -337,6 +342,10 @@ def booth_exit_cell(
 
     if cfg.booth_exit_position == "top_left":
         relative = (0, -1)
+    elif cfg.booth_exit_position == "bottom_right":
+        # 受付(南辺左端)と同じ辺(南辺=正面)の右端。待ち行列は
+        # queue_pattern="left_then_clockwise" と組み合わせて南辺を空けておく前提。
+        relative = (spec.width - 1, spec.height)
     else:
         raise ValueError(
             "unsupported exit_position: "
@@ -417,6 +426,32 @@ def queue_cells_of(
             cell
             for cell in dict.fromkeys(cells)
             if cell != reception_relative
+        ][:spec.max_queue_length]
+
+    elif cfg.queue_pattern == "left_then_clockwise":
+        # 受付セル(南辺=正面)の左隣を起点に、ブース外周を時計回り
+        # (左辺→上辺→右辺)へ一周する。南辺は受付・退出セル専用に空けておき、
+        # exit_position="bottom_right"(南辺右端)と重複しないようにする。
+        cells = [
+            (reception_relative[0] - 1, y)
+            for y in range(spec.height, -2, -1)
+        ]
+
+        cells.extend(
+            (x, -1)
+            for x in range(reception_relative[0] - 1, spec.width + 1)
+        )
+
+        cells.extend(
+            (spec.width, y)
+            for y in range(-1, spec.height + 1)
+        )
+
+        south_cells = [
+            cell
+            for cell in dict.fromkeys(cells)
+            if cell != reception_relative
+            and not (cell[1] == spec.height and 0 <= cell[0] < spec.width)
         ][:spec.max_queue_length]
 
     else:
