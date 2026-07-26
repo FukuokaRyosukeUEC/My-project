@@ -62,8 +62,8 @@ entrance_exit:
 
 booth_geometry:
   reception_position: bottom_left
-  exit_position: top_left
-  queue_pattern: bottom_then_right
+  exit_position: bottom_right
+  queue_pattern: left_then_clockwise
   queue_capacity_per_cell: 5
   queue_walkable: false
 
