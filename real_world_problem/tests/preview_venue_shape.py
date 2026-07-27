@@ -28,7 +28,11 @@ from matplotlib.patches import Patch, Rectangle
 
 from src.models import EMPTY, FORBIDDEN, WALL, load_config  # noqa: E402
 from src.venue import apply_layout, build_base_venue, oriented_booth_size  # noqa: E402
-from src.visualization import BOOTH_ATTR_FACE, BOOTH_ATTR_LABEL  # noqa: E402
+from src.visualization import (  # noqa: E402
+    _FRONT_MARKERS,
+    _OPPOSITE_THETA,
+    booth_style_map,
+)
 
 QUEUE_FACE = "#f7e8a0"  # src/visualization.py の _CELL_FACE[QUEUE] と統一
 
@@ -55,6 +59,7 @@ def _draw_fixed_booths(ax, cfg) -> list[tuple[str, str]]:
         for s in cfg.booths
     )
     layout = apply_layout(cfg, build_base_venue(cfg), positions)
+    style_map = booth_style_map(cfg)
 
     used_attrs: list[tuple[str, str]] = []
     for b, (bx, by, theta) in enumerate(layout.positions):
@@ -75,7 +80,7 @@ def _draw_fixed_booths(ax, cfg) -> list[tuple[str, str]]:
             )
 
         key = (spec.kind, "normal" if spec.is_table else spec.theme)
-        face = BOOTH_ATTR_FACE.get(key, BOOTH_ATTR_FACE[("booth", "normal")])
+        face = style_map.get(key, style_map[("booth", "normal")])[0]
         if key not in used_attrs:
             used_attrs.append(key)
         ax.add_patch(
@@ -101,11 +106,17 @@ def _draw_fixed_booths(ax, cfg) -> list[tuple[str, str]]:
 
         if layout.receptions[b] is not None:
             rx, ry = layout.receptions[b]
-            ax.plot(rx, ry, marker="^", color="black", markersize=4)
+            ax.plot(
+                rx,
+                ry,
+                marker=_FRONT_MARKERS[_OPPOSITE_THETA[int(theta)]],
+                color="black",
+                markersize=4,
+            )
 
         if layout.booth_exits[b] is not None:
             ex, ey = layout.booth_exits[b]
-            ax.plot(ex, ey, marker="v", color="black", markersize=4)
+            ax.plot(ex, ey, marker=_FRONT_MARKERS[int(theta)], color="black", markersize=4)
     return used_attrs
 
 
@@ -161,9 +172,9 @@ def main() -> None:
 
     if not args.no_booths:
         used_attrs = _draw_fixed_booths(ax, cfg)
+        style_map = booth_style_map(cfg)
         handles.extend(
-            Patch(facecolor=BOOTH_ATTR_FACE[k], edgecolor="black",
-                  label=BOOTH_ATTR_LABEL.get(k, str(k)))
+            Patch(facecolor=style_map[k][0], edgecolor="black", label=style_map[k][1])
             for k in used_attrs
         )
         handles.append(Patch(facecolor=QUEUE_FACE, label="待機列"))
