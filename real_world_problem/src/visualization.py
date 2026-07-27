@@ -41,8 +41,27 @@ from .models import (
 from .venue import (
     Layout,
     THETA_ARROWS,
+    THETA_EAST,
+    THETA_NORTH,
+    THETA_SOUTH,
+    THETA_WEST,
     oriented_booth_size,
 )
+
+#: 正面(theta)を向く三角マーカー。退場口はこの向き(正面と反対=ブースから離れる向き)、
+#: 入場口はこの逆向き(正面を向く=ブースに近づく向き)を使う。
+_FRONT_MARKERS = {
+    THETA_NORTH: "^",
+    THETA_EAST: ">",
+    THETA_SOUTH: "v",
+    THETA_WEST: "<",
+}
+_OPPOSITE_THETA = {
+    THETA_NORTH: THETA_SOUTH,
+    THETA_EAST: THETA_WEST,
+    THETA_SOUTH: THETA_NORTH,
+    THETA_WEST: THETA_EAST,
+}
 
 #: §20.1 エージェント色分け(赤=移動不可待機は blocked_count で近似表示)
 STATE_COLORS = {
@@ -62,26 +81,42 @@ _CELL_FACE = {
     FORBIDDEN: "#e6e6e6",
 }
 
-#: (kind, theme) ごとのブース塗り色。通常ブースとの見分け用。
-BOOTH_ATTR_FACE = {
-    ("booth", "normal"): "#8c564b",        # 茶: 通常ブース
-    ("booth", "music"): "#9467bd",         # 紫: 音楽祭関連ブース
-    ("kitchen_car", "normal"): "#ff7f0e",  # 橙: 通常キッチンカー
-    ("kitchen_car", "music"): "#e377c2",   # 桃: 音楽祭関連キッチンカー
-    ("table", "normal"): "#9e9e9e",        # 灰: テーブル・椅子
+#: (kind, "normal") の既定塗り色・ラベル。theme が normal 以外のブースは
+#: booth_style_map() が booths.yaml の登場順にパレットから都度自動割当する
+#: (theme 文字列自体をラベルとして使うため、booths.yaml 側で意味の分かる
+#: 文字列にしておく。例: theme: ジャズ / ゴミステーション)。
+_BASE_ATTR_STYLE = {
+    ("booth", "normal"): ("#8c564b", "通常ブース"),        # 茶
+    ("kitchen_car", "normal"): ("#ff7f0e", "キッチンカー"),  # 橙
+    ("table", "normal"): ("#9e9e9e", "テーブル・椅子"),      # 灰
 }
-BOOTH_ATTR_LABEL = {
-    ("booth", "normal"): "通常ブース",
-    ("booth", "music"): "音楽祭ブース",
-    ("kitchen_car", "normal"): "キッチンカー",
-    ("kitchen_car", "music"): "音楽祭キッチンカー",
-    ("table", "normal"): "テーブル・椅子",
-}
+_EXTRA_PALETTE = (
+    "#9467bd", "#e377c2", "#2ca02c", "#17becf", "#bcbd22",
+    "#d62728", "#1f77b4", "#8dd3c7", "#fdb462", "#b3de69",
+)
 
 
-def _booth_face(spec) -> str:
+def booth_style_map(cfg: Config) -> dict:
+    """cfg.booths に登場する (kind, theme) ごとの (色, ラベル) を都度割り当てる。
+
+    normal は固定色。それ以外の theme は cfg.booths の登場順にパレットから
+    自動割当するため、booths.yaml に theme を追加・変更するだけで色分けに
+    反映される(コード側の色定義追加は不要)。
+    """
+    style = dict(_BASE_ATTR_STYLE)
+    for spec in cfg.booths:
+        theme = "normal" if spec.is_table else spec.theme
+        key = (spec.kind, theme)
+        if key in style:
+            continue
+        color = _EXTRA_PALETTE[(len(style) - len(_BASE_ATTR_STYLE)) % len(_EXTRA_PALETTE)]
+        style[key] = (color, theme)
+    return style
+
+
+def _booth_face(spec, style_map: dict) -> str:
     key = (spec.kind, "normal" if spec.is_table else spec.theme)
-    return BOOTH_ATTR_FACE.get(key, BOOTH_ATTR_FACE[("booth", "normal")])
+    return style_map.get(key, style_map[("booth", "normal")])[0]
 
 
 def draw_venue(ax, cfg: Config, layout: Layout, legend: bool = False) -> None:
@@ -95,6 +130,7 @@ def draw_venue(ax, cfg: Config, layout: Layout, legend: bool = False) -> None:
         ys, xs = np.where(grid == ctype)
         for x, y in zip(xs, ys):
             ax.add_patch(Rectangle((x - 0.5, y - 0.5), 1, 1, facecolor=color, edgecolor="none"))
+    style_map = booth_style_map(cfg)
     used_attrs = []
     for b, (
         bx,
@@ -109,7 +145,7 @@ def draw_venue(ax, cfg: Config, layout: Layout, legend: bool = False) -> None:
             theta,
         )
 
-        face = _booth_face(spec)
+        face = _booth_face(spec, style_map)
 
         key = (
             spec.kind,
@@ -153,7 +189,7 @@ def draw_venue(ax, cfg: Config, layout: Layout, legend: bool = False) -> None:
             ax.plot(
                 rx,
                 ry,
-                marker="v",
+                marker=_FRONT_MARKERS[_OPPOSITE_THETA[int(theta)]],
                 color="black",
                 markersize=4,
             )
@@ -164,14 +200,13 @@ def draw_venue(ax, cfg: Config, layout: Layout, legend: bool = False) -> None:
             ax.plot(
                 ex,
                 ey,
-                marker="^",
+                marker=_FRONT_MARKERS[int(theta)],
                 color="black",
                 markersize=4,
             )
     if legend:
         handles = [
-            Patch(facecolor=BOOTH_ATTR_FACE[k], edgecolor="black",
-                  label=BOOTH_ATTR_LABEL.get(k, str(k)))
+            Patch(facecolor=style_map[k][0], edgecolor="black", label=style_map[k][1])
             for k in used_attrs
         ]
         handles.append(Patch(facecolor=_CELL_FACE[QUEUE], label="待機列"))

@@ -283,10 +283,15 @@ class Simulation:
             v.actual_spawn_step = t
 
     def _free_entrance_cell(self) -> tuple | None:
-        for (x, y) in self.venue.entrance_cells:
-            if self.occupancy[y, x] < self.capacity[y, x]:
-                return (x, y)
-        return None
+        candidates = [
+            (x, y)
+            for (x, y) in self.venue.entrance_cells
+            if self.occupancy[y, x] < self.capacity[y, x]
+        ]
+        if not candidates:
+            return None
+        idx = int(self._tiebreak.integers(len(candidates)))
+        return candidates[idx]
 
     # ------------------------------------------------------------ 2. ブース更新(§11)
     def _booth_step(self, t: int) -> None:
