@@ -4,6 +4,7 @@ pandas
 matplotlib
 pymoo
 pyyaml
+streamlit
 
 # 任意(§22)
 # numba

@@ -96,6 +96,7 @@ def run_nsga2(
     elementwise_runner=None,
     seed: int = 1,
     verbose: bool = True,
+    callback=None,
 ):
     """NSGA-II を実行し pymoo の Result を返す。"""
     kwargs = {}
@@ -115,6 +116,7 @@ def run_nsga2(
         ("n_gen", n_gen or cfg.n_generations),
         seed=seed,
         verbose=verbose,
+        callback=callback,
         save_history=False,
     )
 
