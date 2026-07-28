@@ -222,9 +222,10 @@ def plot_pareto_front(
     reps: dict[str, int],
     path: str | Path,
     initial_f: np.ndarray | None = None,
+    fixed_f: np.ndarray | None = None,
 ) -> None:
     """
-    最終パレート解、代表解、および比較用の初期解を描画する。
+    最終パレート解、代表解、比較用の初期解、および固定配置を描画する。
 
     Parameters
     ----------
@@ -238,6 +239,10 @@ def plot_pareto_front(
     initial_f
         初期解の目的関数値 [f_move, f_congestion]。
         Noneの場合は初期解を描画しない。
+    fixed_f
+        booths.yaml の固定配置の目的関数値
+        [f_move, f_congestion]。
+        Noneの場合は固定配置を描画しない。
     """
     F = np.atleast_2d(np.asarray(F, dtype=float))
 
@@ -296,10 +301,13 @@ def plot_pareto_front(
         )
 
     # ---------------------------------------------------------
-    # 比較に使用した初期解
+    # 比較に使用したランダム初期解
     # ---------------------------------------------------------
     if initial_f is not None:
-        initial_f = np.asarray(initial_f, dtype=float).reshape(-1)
+        initial_f = np.asarray(
+            initial_f,
+            dtype=float,
+        ).reshape(-1)
 
         if initial_f.size != 2:
             raise ValueError(
@@ -320,12 +328,12 @@ def plot_pareto_front(
             s=110,
             edgecolors="white",
             linewidths=1.0,
-            label="Initial solution",
+            label="Random solution",
             zorder=5,
         )
 
         ax.annotate(
-            "Initial",
+            "Random",
             xy=(initial_f[0], initial_f[1]),
             xytext=(8, 8),
             textcoords="offset points",
@@ -334,11 +342,53 @@ def plot_pareto_front(
             zorder=6,
         )
 
+    # ---------------------------------------------------------
+    # booths.yaml に記載された配置計画
+    # ---------------------------------------------------------
+    if fixed_f is not None:
+        fixed_f = np.asarray(
+            fixed_f,
+            dtype=float,
+        ).reshape(-1)
+
+        if fixed_f.size != 2:
+            raise ValueError(
+                "fixed_f must contain exactly two values: "
+                "[f_move, f_congestion]."
+            )
+
+        if not np.all(np.isfinite(fixed_f)):
+            raise ValueError(
+                f"fixed_f contains non-finite values: {fixed_f}"
+            )
+
+        ax.scatter(
+            fixed_f[0],
+            fixed_f[1],
+            marker="X",
+            c="tab:purple",
+            s=150,
+            edgecolors="black",
+            linewidths=0.8,
+            label="Layout plan (booths.yaml)",
+            zorder=5,
+        )
+
+        ax.annotate(
+            "booths.yaml",
+            xy=(fixed_f[0], fixed_f[1]),
+            xytext=(8, -14),
+            textcoords="offset points",
+            fontsize=9,
+            fontweight="bold",
+            zorder=6,
+        )
+
     ax.set_xlabel("f_move: mean free-walk time [s]")
     ax.set_ylabel("f_congestion")
-    ax.set_title("Pareto front and initial solution")
+    ax.set_title("Pareto front and comparison layouts")
 
-    # どちらも最小化目的であることを明示
+    # どちらの目的関数も最小化であることを明示する。
     ax.text(
         0.02,
         0.98,

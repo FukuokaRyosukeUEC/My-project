@@ -1472,7 +1472,7 @@ def run_nsga2(
         # ---------------------------------------------------------
 
         # 5世代に1回、局所探索する。
-        local_search_interval=5,
+        local_search_interval=1,
 
         # 被支配解から3個体選択する。
         n_dominated_parents=3,

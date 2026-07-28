@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from pymoo.core.problem import StarmapParallelization  # noqa: E402
 
-from src.constraints import to_integer_layout  # noqa: E402
+from src.constraints import compute_violation, to_integer_layout  # noqa: E402
 from src.models import load_config  # noqa: E402
 from src.optimization import (  # noqa: E402
     calculate_hv_history,
@@ -174,11 +174,69 @@ def main() -> None:
     # -------------------------------------------------------------
     # パレート解・代表解・初期解を同じグラフに表示
     # -------------------------------------------------------------
+        # -------------------------------------------------------------
+    # booths.yaml に記載された固定配置を評価
+    # -------------------------------------------------------------
+    missing_fixed_positions = [
+        booth.booth_id
+        for booth in cfg.booths
+        if booth.fixed_position is None
+    ]
+
+    if missing_fixed_positions:
+        raise ValueError(
+            "booths.yaml の fixed_position が未設定のブースがあります: "
+            f"{missing_fixed_positions}"
+        )
+
+    # booths.yaml の fixed_position をシミュレーション用の形式に変換する。
+    # fixed_positions:
+    # ((x1, y1, theta1), (x2, y2, theta2), ...)
+    fixed_positions = tuple(
+        tuple(int(v) for v in booth.fixed_position)
+        for booth in cfg.booths
+    )
+
+    # booths.yaml の配置が制約を満たしているか確認する。
+    fixed_violation = compute_violation(
+        cfg,
+        ctx.venue,
+        fixed_positions,
+    )
+
+    if fixed_violation > 0:
+        raise ValueError(
+            "booths.yaml の固定配置が制約を満たしていません: "
+            f"g = {fixed_violation}"
+        )
+
+    # 最適化解やランダム解と同じ条件で固定配置を評価する。
+    fixed_result = evaluate_layout(
+        ctx,
+        fixed_positions,
+    )
+
+    fixed_f = np.array(
+        [
+            fixed_result.f_move,
+            fixed_result.f_congestion,
+        ],
+        dtype=float,
+    )
+
+    print("\n=== booths.yaml の固定配置 ===")
+    print(f"f_move       = {fixed_f[0]:.6f}")
+    print(f"f_congestion = {fixed_f[1]:.6e}")
+
+    # -------------------------------------------------------------
+    # パレート解・代表解・初期解・固定配置を同じグラフに表示
+    # -------------------------------------------------------------
     plot_pareto_front(
         F=F,
         reps=reps,
         path=out / "pareto_front.png",
         initial_f=initial_f,
+        fixed_f=fixed_f,
     )
 
     # -------------------------------------------------------------
