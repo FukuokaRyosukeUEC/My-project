@@ -79,3 +79,6 @@ Thumbs.db
 
 # Project outputs
 results/
+
+# UI の実行ディレクトリ(生成した config・スナップショット・図)
+runs/

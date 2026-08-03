@@ -1086,11 +1086,18 @@ class MemeticNSGA2(NSGA2):
         )
     
 class ObjectiveHistoryCallback(Callback):
-    """各世代の環境選択後集団の目的関数値と制約値を保存する。"""
+    """各世代の環境選択後集団の目的関数値と制約値を保存する。
 
-    def __init__(self) -> None:
+    ``on_generation`` を渡すと、各世代の記録後に
+    ``on_generation(algorithm)`` を呼び出す。
+    UI(``ui/``)が世代ごとのスナップショットを書き出すための
+    任意フックであり、None なら従来どおり何もしない。
+    """
+
+    def __init__(self, on_generation=None) -> None:
         super().__init__()
         self.records: list[dict] = []
+        self.on_generation = on_generation
 
     def notify(self, algorithm) -> None:
         # その世代の環境選択後集団を取得
@@ -1120,6 +1127,10 @@ class ObjectiveHistoryCallback(Callback):
                 "G": G,
             }
         )
+
+        # 任意フック(UI のスナップショット出力など)。
+        if self.on_generation is not None:
+            self.on_generation(algorithm)
 
 
 def _feasible_objectives(record: dict) -> np.ndarray:
@@ -1449,8 +1460,14 @@ def run_nsga2(
     mutation_prob: float = 0.2,
     booth_mutation_prob: float = 0.1,
     mutation_max_position_trials: int = 100,
+    on_generation=None,
 ):
-    """近傍探索付きNSGA-IIを実行し、pymooのResultを返す。"""
+    """近傍探索付きNSGA-IIを実行し、pymooのResultを返す。
+
+    ``on_generation`` は各世代の環境選択後に
+    ``on_generation(algorithm)`` として呼ばれる任意フック。
+    既定の None では従来と挙動は変わらない。
+    """
 
     kwargs = {}
 
@@ -1525,7 +1542,9 @@ def run_nsga2(
 
     # 各世代の目的関数値と制約値を記録する。
     history_callback = (
-        ObjectiveHistoryCallback()
+        ObjectiveHistoryCallback(
+            on_generation=on_generation,
+        )
     )
 
     res = minimize(
