@@ -89,6 +89,51 @@ def render_heatmap(cfg: Config, ctx: StaticContext, x, path: Path) -> tuple[Path
     return path, kpis
 
 
+# ---------------------------------------------------------------- 時系列
+
+def simulate_series(cfg: Config, ctx: StaticContext, x) -> dict:
+    """1 解をシミュレーションし、混雑度・移動負担の時系列を返す。
+
+    戻り値:
+        {"time_seconds": [...], "congestion": [...], "movement": [...],
+         "f_move": float, "f_congestion": float, "timed_out": bool}
+
+    time_seconds はステップ番号に cfg.dt_seconds を掛けた実時間(秒)。
+    """
+    positions = to_integer_layout(x)
+    result = evaluate_layout(ctx, positions)
+
+    steps = list(result.time_steps)
+    cong = list(result.congestion_history)
+    move = list(result.movement_history)
+
+    # 3 本の長さは揃っているはずだが、途中打ち切り時のずれに備えて短い方に合わせる。
+    n = min(len(steps), len(cong), len(move))
+    dt = float(cfg.dt_seconds)
+
+    cong = [float(cong[i]) for i in range(n)]
+
+    # congestion_history は「歩行可能セルあたりの重み付き平均」で、
+    # f_congestion(= 重み付き総和 / n_steps)とは正規化が違う。
+    # 曲線の時間平均が f_congestion に一致するようスケールを揃えておくと、
+    # パレート図の縦軸と直接見比べられる。
+    total = sum(cong)
+    if n and total > 0.0:
+        scale = float(result.f_congestion) * n / total
+    else:
+        scale = 1.0
+
+    return {
+        "time_seconds": [float(steps[i]) * dt for i in range(n)],
+        "congestion": [c * scale for c in cong],
+        "congestion_raw": cong,
+        "movement": [float(move[i]) for i in range(n)],
+        "f_move": float(result.f_move),
+        "f_congestion": float(result.f_congestion),
+        "timed_out": bool(result.timed_out),
+    }
+
+
 # ---------------------------------------------------------------- アニメーション
 
 
