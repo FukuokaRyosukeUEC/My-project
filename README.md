@@ -147,6 +147,9 @@ python scripts/visualize_solution.py results/knee_layout.json --animate
 
 # テスト(§23)
 python -m pytest tests/ -q
+
+# UI上での実行
+streamlit run ui/app.py
 ```
 
 成果物は `results/` に出力される(§19.1):
