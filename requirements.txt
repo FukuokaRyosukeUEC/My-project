@@ -5,6 +5,10 @@ matplotlib
 pymoo
 pyyaml
 
+# 最適化 UI(real_world_problem/ui)。CLI のみ使うなら不要。
+streamlit>=1.37
+plotly>=5.20
+
 # 任意(§22)
 # numba
 # tqdm
