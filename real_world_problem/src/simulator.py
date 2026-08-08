@@ -33,7 +33,7 @@ from .models import (
     Visitor,
 )
 from .rng import decision_rng, softmax_choice, tiebreak_rng
-from .routing import astar, bfs_distance_field, descend_path
+from .routing import astar, bfs_distance_field, descend_path_indices
 from .venue import (
     Layout,
     Venue,
@@ -70,6 +70,7 @@ class Simulation:
         layout: Layout,
         visitor_records: tuple,
         collect_heatmap: bool = False,
+        collect_time_series: bool = True,
         record_frames: bool = False,
         frame_interval: int = 1,
     ) -> None:
@@ -77,6 +78,7 @@ class Simulation:
         self.venue = venue
         self.layout = layout
         self.collect_heatmap = collect_heatmap
+        self.collect_time_series = collect_time_series
         self.record_frames = record_frames
         if frame_interval < 1:
             raise ValueError("frame_interval must be at least 1")
@@ -86,6 +88,13 @@ class Simulation:
         self.walkable = layout.walkable
         self.capacity = layout.capacity.astype(np.int16)
         self.occupancy = np.zeros((H, W), dtype=np.int16)
+        # 占有率計算用の1次元ビュー。occupancyはin-place更新されるため、
+        # このビューにも常に最新値が反映される。
+        self._occupancy_flat = self.occupancy.reshape(-1)
+        self._capacity_flat_float = self.capacity.reshape(-1).astype(np.float64)
+        self._crowd_path_cache: dict[
+            tuple[int, tuple[int, int]], np.ndarray
+        ] = {}
 
         # §9.4 静的距離場(配置ごとに 1 回、体験ブース数+1 回の BFS)。
         # テーブル(受付なし)は目的地にならないため None。
@@ -210,15 +219,30 @@ class Simulation:
 
         # ブース周辺と見なす範囲。まずは半径3セルを推奨。
         target_radius = 3
-        booth_xy = list(booth_related)
+        # 各セルから全ブース関連セルまでの距離を総当たりで求める代わりに、
+        # 関連セルマスクをマンハッタン半径分だけ平行移動してORする。
+        # 障害物を無視したマンハッタン距離という元の定義と厳密に同値。
+        related = np.zeros((H, W), dtype=bool)
+        for x, y in booth_related:
+            related[y, x] = True
 
-        for y in range(H):
-            for x in range(W):
-                if not self.walkable[y, x]:
-                    continue
-                d_min = min(abs(x - bx) + abs(y - by) for bx, by in booth_xy)
-                if d_min <= target_radius:
-                    weights[y, x] = 1.0
+        near = np.zeros((H, W), dtype=bool)
+        for dy in range(-target_radius, target_radius + 1):
+            max_dx = target_radius - abs(dy)
+            for dx in range(-max_dx, max_dx + 1):
+                src_y0 = max(0, -dy)
+                src_y1 = min(H, H - dy)
+                src_x0 = max(0, -dx)
+                src_x1 = min(W, W - dx)
+                dst_y0 = src_y0 + dy
+                dst_y1 = src_y1 + dy
+                dst_x0 = src_x0 + dx
+                dst_x1 = src_x1 + dx
+                near[dst_y0:dst_y1, dst_x0:dst_x1] |= related[
+                    src_y0:src_y1, src_x0:src_x1
+                ]
+
+        weights[near & self.walkable] = 1.0
 
         return weights
 
@@ -451,13 +475,23 @@ class Simulation:
 
     def _crowd_on_path(self, pos: tuple, b: int) -> float:
         """C̃: 静的最短経路上の通行可能セルの占有率平均(評価時点スナップショット)。"""
-        cells = descend_path(self.booth_fields[b], pos)
-        if not cells:
+        cache_key = (int(b), (int(pos[0]), int(pos[1])))
+        flat_indices = self._crowd_path_cache.get(cache_key)
+        if flat_indices is None:
+            flat_indices = descend_path_indices(self.booth_fields[b], pos)
+            self._crowd_path_cache[cache_key] = flat_indices
+        if flat_indices.size == 0:
             return 0.0
-        s = 0.0
-        for (x, y) in cells:
-            s += self.occupancy[y, x] / float(self.capacity[y, x])
-        return min(1.0, s / len(cells))
+        # 経路自体は静的なのでインデックスを再利用し、占有率の加算だけを
+        # NumPyで実行する。占有値は毎時点の最新スナップショットを参照する。
+        mean_ratio = float(
+            np.sum(
+                self._occupancy_flat[flat_indices]
+                / self._capacity_flat_float[flat_indices]
+            )
+            / flat_indices.size
+        )
+        return min(1.0, mean_ratio)
 
     def _start_exiting(self, v: Visitor) -> None:
         v.state = EXITING
@@ -690,29 +724,30 @@ class Simulation:
         # ---------------------------------------------------------
         # 2. タイムステップ t までの移動負担
         # ---------------------------------------------------------
-        spawned = [
-            v for v in self.visitors
-            if v.state != NOT_ARRIVED
-        ]
+        if self.collect_time_series:
+            spawned = [
+                v for v in self.visitors
+                if v.state != NOT_ARRIVED
+            ]
 
-        if spawned:
-            movement_burden = float(
-                np.mean([
-                    v.moved_cells
-                    * cfg.cell_size_meters
-                    / v.speed_mps
-                    for v in spawned
-                ])
-            )
-        else:
-            movement_burden = 0.0
+            if spawned:
+                movement_burden = float(
+                    np.mean([
+                        v.moved_cells
+                        * cfg.cell_size_meters
+                        / v.speed_mps
+                        for v in spawned
+                    ])
+                )
+            else:
+                movement_burden = 0.0
 
-        # ---------------------------------------------------------
-        # 3. 時系列として保存
-        # ---------------------------------------------------------
-        self.time_steps.append(t)
-        self.congestion_history.append(step_weighted_congestion)
-        self.movement_history.append(movement_burden)
+            # -----------------------------------------------------
+            # 3. 可視化を要求された評価だけ時系列として保存
+            # -----------------------------------------------------
+            self.time_steps.append(t)
+            self.congestion_history.append(step_weighted_congestion)
+            self.movement_history.append(movement_burden)
 
         # ---------------------------------------------------------
         # 既存のKPI集計
@@ -768,7 +803,11 @@ class Simulation:
         #   移動負担 = 最終値のまま
         #
         # とする。
-        if not timed_out and len(self.time_steps) < self.cfg.n_steps:
+        if (
+            self.collect_time_series
+            and not timed_out
+            and len(self.time_steps) < self.cfg.n_steps
+        ):
             start = len(self.time_steps)
             remaining = self.cfg.n_steps - start
 

@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from .models import EMPTY, FORBIDDEN, WALKABLE_TYPES, Config
@@ -23,6 +25,63 @@ from .venue import (
 )
 
 REACHABILITY_PENALTY = 100.0
+
+
+@dataclass(frozen=True)
+class PlacementGeometry:
+    """1配置から一度だけ構築する、物理制約・整然さ制約共通の幾何情報。"""
+
+    positions: tuple[tuple[int, int, int], ...]
+    booth_cells: tuple[tuple[tuple[int, int], ...], ...]
+    receptions: tuple[tuple[int, int] | None, ...]
+    booth_exits: tuple[tuple[int, int] | None, ...]
+    queue_cells: tuple[tuple[tuple[int, int], ...], ...]
+    claimed_cells: tuple[frozenset[tuple[int, int]], ...]
+
+
+def build_placement_geometry(
+    cfg: Config,
+    positions: tuple[tuple[int, int, int], ...],
+) -> PlacementGeometry:
+    """配置物セルを列挙する処理を、制約間で共有できる形で返す。"""
+
+    normalized = tuple(
+        (int(x_pos), int(y_pos), int(theta))
+        for x_pos, y_pos, theta in positions
+    )
+    booth_cells = tuple(
+        tuple(booth_cells_of(cfg, booth_id, *normalized[booth_id]))
+        for booth_id in range(len(cfg.booths))
+    )
+    receptions = tuple(
+        reception_cell(cfg, booth_id, *normalized[booth_id])
+        for booth_id in range(len(cfg.booths))
+    )
+    booth_exits = tuple(
+        booth_exit_cell(cfg, booth_id, *normalized[booth_id])
+        for booth_id in range(len(cfg.booths))
+    )
+    queue_cells = tuple(
+        tuple(queue_cells_of(cfg, booth_id, *normalized[booth_id]))
+        for booth_id in range(len(cfg.booths))
+    )
+    claimed_cells = []
+    for booth_id in range(len(cfg.booths)):
+        claimed = set(booth_cells[booth_id])
+        if receptions[booth_id] is not None:
+            claimed.add(receptions[booth_id])
+        if booth_exits[booth_id] is not None:
+            claimed.add(booth_exits[booth_id])
+        claimed.update(queue_cells[booth_id])
+        claimed_cells.append(frozenset(claimed))
+    return PlacementGeometry(
+        positions=normalized,
+        booth_cells=booth_cells,
+        receptions=receptions,
+        booth_exits=booth_exits,
+        queue_cells=queue_cells,
+        claimed_cells=tuple(claimed_cells),
+    )
 
 
 def to_integer_layout(x: np.ndarray) -> tuple[tuple[int, int, int], ...]:
@@ -88,17 +147,23 @@ def _in_bounds(cfg: Config, x: int, y: int) -> bool:
     return 0 <= x < cfg.grid_width and 0 <= y < cfg.grid_height
 
 
-def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
+def compute_violation(
+    cfg: Config,
+    venue: Venue,
+    positions: tuple,
+    geometry: PlacementGeometry | None = None,
+) -> float:
     """配置の制約違反量 g を返す(§14)。g == 0 なら有効配置。"""
     H, W = cfg.grid_height, cfg.grid_width
     g = 0.0
     n_booths = len(cfg.booths)
 
-    # 各ブースの占有セル・受付・行列セルを収集
-    booth_cells = [booth_cells_of(cfg, b, *positions[b]) for b in range(n_booths)]
-    receptions = [reception_cell(cfg, b, *positions[b]) for b in range(n_booths)]
-    booth_exits = [booth_exit_cell(cfg, b, *positions[b]) for b in range(n_booths)]
-    qcells = [queue_cells_of(cfg, b, *positions[b]) for b in range(n_booths)]
+    # 各ブースの占有セル・受付・行列セルを収集。直接最適化では整然さ制約と共有する。
+    geom = geometry or build_placement_geometry(cfg, positions)
+    booth_cells = geom.booth_cells
+    receptions = geom.receptions
+    booth_exits = geom.booth_exits
+    qcells = geom.queue_cells
 
     # 使用セル集合(受付+行列): 相互重複チェック用
     claim_count = np.zeros((H, W), dtype=np.int16)  # 場内セルの多重使用数
@@ -118,13 +183,7 @@ def compute_violation(cfg: Config, venue: Venue, positions: tuple) -> float:
         # 20260629 方式では受付が待機列先頭と同じセル。ブース内の重複は
         # 合法なので、ブースごとに一意化してから他ブースとの競合を数える。
         # テーブルは受付・退出・行列を持たない(None / 空)。
-        claimed = set(booth_cells[b])
-        if receptions[b] is not None:
-            claimed.add(receptions[b])
-        if booth_exits[b] is not None:
-            claimed.add(booth_exits[b])
-        claimed.update(qcells[b])
-        g += claim(claimed)
+        g += claim(geom.claimed_cells[b])
 
     # --- 項目 1: 重なり(ブース同士・受付・行列の相互重複)
     g += float(np.sum(np.maximum(claim_count - 1, 0)))

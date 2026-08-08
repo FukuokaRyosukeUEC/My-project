@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import animation
 from matplotlib.lines import Line2D
-from matplotlib.patches import Patch, Rectangle
+from matplotlib.patches import Patch, Polygon, Rectangle
 
 from .models import (
     BOOTH,  # noqa: F401 (セル種別の網羅性のため保持)
@@ -93,6 +93,13 @@ _BASE_ATTR_STYLE = {
 _EXTRA_PALETTE = (
     "#9467bd", "#e377c2", "#2ca02c", "#17becf", "#bcbd22",
     "#d62728", "#1f77b4", "#8dd3c7", "#fdb462", "#b3de69",
+)
+_AREA_EDGE_PALETTE = (
+    "#1f77b4",
+    "#2ca02c",
+    "#9467bd",
+    "#d62728",
+    "#17becf",
 )
 
 
@@ -561,8 +568,8 @@ def plot_time_series_comparison(
 
 
 def plot_heatmaps(cfg: Config, layout: Layout, heatmap, over_map, path: str | Path, title="") -> None:
-    """§20.2: 累積滞在人数と混雑閾値超過時間のヒートマップ。"""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    """§20.2: ヒートマップへ属性色と広場区画境界を重ねて描画する。"""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     for ax, data, name in (
         (axes[0], heatmap, "cumulative presence [person-steps]"),
         (axes[1], over_map, "time over safe occupancy [s]"),
@@ -572,7 +579,36 @@ def plot_heatmaps(cfg: Config, layout: Layout, heatmap, over_map, path: str | Pa
         draw_venue_outline(ax, cfg, layout)
         ax.set_title(f"{title} {name}", fontsize=10)
         fig.colorbar(im, ax=ax, fraction=0.04)
-    fig.tight_layout()
+    style_map = booth_style_map(cfg)
+    used_attrs = []
+    for spec in cfg.booths:
+        key = (spec.kind, "normal" if spec.is_table else spec.theme)
+        if key not in used_attrs:
+            used_attrs.append(key)
+    handles = [
+        Patch(facecolor=style_map[key][0], edgecolor="black", label=style_map[key][1])
+        for key in used_attrs
+    ]
+    for i, (area_name, _polygon) in enumerate(cfg.venue_areas):
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=_AREA_EDGE_PALETTE[i % len(_AREA_EDGE_PALETTE)],
+                linewidth=2.0,
+                label=f"区画: {area_name}",
+            )
+        )
+    if handles:
+        fig.legend(
+            handles=handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.01),
+            ncol=min(5, len(handles)),
+            fontsize=8,
+            framealpha=0.9,
+        )
+    fig.tight_layout(rect=(0.0, 0.08, 1.0, 1.0))
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
@@ -582,6 +618,28 @@ def draw_venue_outline(
     cfg: Config,
     layout: Layout,
 ) -> None:
+    # venue_shape.areasをセル境界座標へ変換し、上・下広場などの区画を明示する。
+    for i, (_area_name, polygon) in enumerate(cfg.venue_areas):
+        vertices = [
+            (
+                float(px) / cfg.cell_size_meters - 0.5,
+                float(py) / cfg.cell_size_meters - 0.5,
+            )
+            for px, py in polygon
+        ]
+        edge = _AREA_EDGE_PALETTE[i % len(_AREA_EDGE_PALETTE)]
+        ax.add_patch(
+            Polygon(
+                vertices,
+                closed=True,
+                fill=False,
+                edgecolor=edge,
+                linewidth=1.5,
+                linestyle="--",
+                zorder=3,
+            )
+        )
+    style_map = booth_style_map(cfg)
     for b, (
         bx,
         by,
@@ -604,9 +662,10 @@ def draw_venue_outline(
                 width,
                 height,
                 fill=True,
-                facecolor="#cccccc",
+                facecolor=_booth_face(spec, style_map),
                 edgecolor="black",
                 linewidth=1.0,
+                zorder=4,
             )
         )
 
@@ -619,8 +678,34 @@ def draw_venue_outline(
                 ha="center",
                 va="center",
                 fontsize=7,
+                color="white",
+                zorder=5,
             )
 
+        if layout.receptions[b] is not None:
+            rx, ry = layout.receptions[b]
+            ax.plot(
+                rx,
+                ry,
+                marker=_FRONT_MARKERS[_OPPOSITE_THETA[int(theta)]],
+                color="black",
+                markersize=3.5,
+                zorder=6,
+            )
+        if layout.booth_exits[b] is not None:
+            ex, ey = layout.booth_exits[b]
+            ax.plot(
+                ex,
+                ey,
+                marker=_FRONT_MARKERS[int(theta)],
+                color="black",
+                markersize=3.5,
+                zorder=6,
+            )
+
+    ax.set_xlim(-0.5, cfg.grid_width - 0.5)
+    ax.set_ylim(cfg.grid_height - 0.5, -0.5)
+    ax.set_aspect("equal")
     ax.set_xticks([])
     ax.set_yticks([])
 
@@ -631,14 +716,24 @@ def comparison_table(results: dict[str, dict], path: str | Path) -> pd.DataFrame
     results: {"移動重視": kpis+目的関数 dict, ...}
     """
     rows = {
-        "平均自由歩行換算時間 [s]": "mean_free_walk_seconds",
+        "移動負担 f_move [s/人]": "mean_free_walk_seconds",
         "平均待ち時間 [s]": "mean_queue_seconds",
         "平均ブロック待機時間 [s]": "mean_blocked_seconds",
         "混雑度 f_congestion": "f_congestion",
+        "会場全体混雑（監査値）": "f_congestion_raw",
+        "ブース近傍混雑": "f_congestion_booth_near",
         "最大占有率": "max_cell_occupancy_ratio",
         "体験成功率": "experience_success_rate",
         "諦め回数": "give_up_total",
         "平均幸福度": "mean_happiness",
+        "整然さ最大制約比 (≤1)": "orderliness",
+        "配置モチーフ非所属率": "organization_nonmembership",
+        "配置モチーフ複雑度": "motif_complexity",
+        "列・外周基準からの誤差": "alignment_error",
+        "モチーフ内間隔変動": "gap_variation",
+        "向き不一致率": "orientation",
+        "孤立率": "isolation",
+        "ブース正面通路閉塞率": "front_clearance",
     }
     table = pd.DataFrame(
         {name: {label: vals.get(key, np.nan) for label, key in rows.items()}
