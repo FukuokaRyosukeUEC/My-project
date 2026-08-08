@@ -1,16 +1,25 @@
-"""run_optimization.py — NSGA-II 最適化の実行と成果物出力(§15, §16, §19, §20)。
+"""138次元直接表現の1層型NSGA-IIを実行する。
 
-使用例:
-    python scripts/run_optimization.py                 # フル設定(pop=64, gen=50)
-    python scripts/run_optimization.py --pop 16 --gen 8 --workers 4
+例:
+    python scripts/run_optimization.py --pop 100 --gen 100 --workers 8
+
+初期集団は、物理制約と整然さ制約を満たすランダム個体だけで生成する。
+``booths.yaml`` の固定配置は、最適化後の比較にだけ使用する。
 """
 from __future__ import annotations
 
 import argparse
+from functools import partial
+import json
+from multiprocessing import Pool
+import os
+from pathlib import Path
 import sys
 import time
-from multiprocessing import Pool
-from pathlib import Path
+
+# プロセス並列とBLAS/OpenMP内部並列の二重並列化を避ける。
+for _thread_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_thread_var, "1")
 
 import numpy as np
 import pandas as pd
@@ -18,22 +27,28 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pymoo.core.problem import StarmapParallelization  # noqa: E402
+try:
+    from pymoo.parallelization import StarmapParallelization
+except ImportError:
+    from pymoo.core.problem import StarmapParallelization
 
-from src.constraints import compute_violation, to_integer_layout  # noqa: E402
-from src.models import load_config  # noqa: E402
-from src.optimization import (  # noqa: E402
-    calculate_hv_history,
-    run_nsga2,
-    sample_valid_layout,
-    save_results,
-    select_representatives,
-    variable_bounds,
+from src.constraints import compute_violation
+from src.models import load_config
+from src.optimization import calculate_hv_history, save_results, select_representatives
+from src.parallel import build_context, default_workers, evaluate_layout, init_worker
+from src.routing import warmup_routing_kernels
+from src.direct_optimization import (
+    Direct138LayoutProblem,
+    ORDERLINESS_COMPONENT_KEYS,
+    OrderlinessLimits,
+    RandomFeasibleDirectSampling,
+    compute_direct_orderliness,
+    prepare_random_feasible_direct_population,
+    run_direct_nsga2,
+    save_direct_metadata,
 )
-from src.rng import sampling_rng
-from src.parallel import build_context, default_workers, evaluate_layout, init_worker  # noqa: E402
-from src.venue import apply_layout  # noqa: E402
-from src.visualization import (  # noqa: E402
+from src.venue import apply_layout
+from src.visualization import (
     comparison_table,
     plot_heatmaps,
     plot_hypervolume_history,
@@ -42,226 +57,442 @@ from src.visualization import (  # noqa: E402
 )
 
 
+def _random_initial_layout(cfg, seed: int, limits, max_orderliness, max_trials: int):
+    """最適化初期化と同じ規則で、第1ランダム制約充足個体を再現する。"""
+    problem = Direct138LayoutProblem(
+        cfg,
+        orderliness_limits=limits,
+        max_orderliness=max_orderliness,
+    )
+    design = prepare_random_feasible_direct_population(
+        cfg,
+        pop_size=1,
+        seed=seed,
+        orderliness_limits=problem.orderliness_limits,
+        initial_max_trials=max_trials,
+    )
+    design = design[0]
+    return design, compute_direct_orderliness(
+        cfg, design, limits=problem.orderliness_limits
+    )
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default=str(ROOT / "config"))
-    ap.add_argument("--pop", type=int, default=None, help="個体数(既定: config)")
-    ap.add_argument("--gen", type=int, default=None, help="世代数(既定: config)")
-    ap.add_argument("--workers", type=int, default=None, help="並列プロセス数")
-    ap.add_argument("--out", default=str(ROOT / "results"))
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=str(ROOT / "config"))
+    parser.add_argument("--pop", type=int, default=None)
+    parser.add_argument("--gen", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--max-orderliness",
+        type=float,
+        default=None,
+        help="旧版互換: 0.25を基準に整然さ成分上限を一様拡縮する",
+    )
+    parser.add_argument(
+        "--max-organization-nonmembership",
+        "--max-lane-nonmembership",
+        dest="max_organization_nonmembership",
+        type=float,
+        default=0.30,
+        help="内部列または外周追従モチーフに属さない割合の上限(既定: 0.30)",
+    )
+    parser.add_argument(
+        "--max-motif-complexity",
+        type=float,
+        default=1.20,
+        help="必要標準モチーフ数に対する実モチーフ数比の上限(既定: 1.20)",
+    )
+    parser.add_argument(
+        "--max-alignment-error",
+        "--max-lane-error",
+        dest="max_alignment_error",
+        type=float,
+        default=0.36,
+        help="内部列基準線または外周オフセットからの誤差上限(既定: 0.36)",
+    )
+    parser.add_argument(
+        "--max-gap-variation",
+        type=float,
+        default=0.20,
+        help="選択モチーフ内の外周間隔変動上限(既定: 0.20)",
+    )
+    parser.add_argument(
+        "--max-orientation-error",
+        type=float,
+        default=0.25,
+        help="各群の向き不一致率の上限(既定: 0.25)",
+    )
+    parser.add_argument(
+        "--max-isolation",
+        type=float,
+        default=0.20,
+        help="内部列・外周追従の近傍を持たない配置物割合の上限(既定: 0.20)",
+    )
+    # 旧版CLIを壊さないため受理するが、新方式では用途限定制約を廃止した。
+    parser.add_argument(
+        "--max-table-lane-nonmembership",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--max-table-lane-count-excess",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--max-table-gap-variation",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--max-front-clearance-violation",
+        type=float,
+        default=0.0,
+        help="ブース正面2セル通路の閉塞セル割合上限(既定: 0)",
+    )
+    parser.add_argument(
+        "--initial-max-trials",
+        type=int,
+        default=5000,
+        help="ランダム制約充足初期個体1件あたりの最大試行数",
+    )
+    parser.add_argument(
+        "--mutation-individual-prob",
+        type=float,
+        default=0.70,
+        help="子個体に三段階突然変異を適用する確率(既定: 0.70)",
+    )
+    parser.add_argument(
+        "--mutation-local-weight",
+        type=float,
+        default=0.55,
+        help="突然変異対象個体で局所変異を選ぶ確率(既定: 0.55)",
+    )
+    parser.add_argument(
+        "--mutation-meso-weight",
+        type=float,
+        default=0.30,
+        help="突然変異対象個体で中規模変異を選ぶ確率(既定: 0.30)",
+    )
+    parser.add_argument(
+        "--mutation-macro-weight",
+        type=float,
+        default=0.15,
+        help="突然変異対象個体で大域変異を選ぶ確率(既定: 0.15)",
+    )
+    parser.add_argument(
+        "--memetic-interval",
+        type=int,
+        default=5,
+        help="非劣解近傍探索の実行間隔(既定: 5世代)",
+    )
+    parser.add_argument(
+        "--memetic-parents",
+        type=int,
+        default=10,
+        help="近傍探索する非劣解数(既定: 10)",
+    )
+    parser.add_argument(
+        "--memetic-neighbors",
+        type=int,
+        default=10,
+        help="非劣解1個体当たりの近傍評価数(既定: 10)",
+    )
+    parser.add_argument(
+        "--memetic-max-neighbor-trials",
+        type=int,
+        default=1000,
+        help="1親から実行可能近傍を生成する最大試行数",
+    )
+    parser.add_argument("--out", default=str(ROOT / "results"))
+    args = parser.parse_args()
+    mutation_weights = (
+        args.mutation_local_weight
+        + args.mutation_meso_weight
+        + args.mutation_macro_weight
+    )
+    if not np.isclose(mutation_weights, 1.0):
+        parser.error("三段階突然変異の3つの重みの合計は1にしてください")
+    if not 0.0 <= args.mutation_individual_prob <= 1.0:
+        parser.error("--mutation-individual-probは0以上1以下にしてください")
+    if min(args.memetic_interval, args.memetic_parents, args.memetic_neighbors) < 1:
+        parser.error("Memeticの間隔・親数・近傍数は1以上にしてください")
+    if args.memetic_max_neighbor_trials < args.memetic_neighbors:
+        parser.error("近傍生成最大試行数は近傍数以上にしてください")
+
+    orderliness_limits = OrderlinessLimits(
+        organization_nonmembership=args.max_organization_nonmembership,
+        motif_complexity=args.max_motif_complexity,
+        alignment_error=args.max_alignment_error,
+        gap_variation=args.max_gap_variation,
+        orientation=args.max_orientation_error,
+        isolation=args.max_isolation,
+        front_clearance=args.max_front_clearance_violation,
+    )
 
     cfg = load_config(args.config)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     workers = args.workers if args.workers is not None else default_workers()
+    print(
+        f"138次元・1層型GA設定: pop={args.pop or cfg.population_size}, "
+        f"gen={args.gen or cfg.n_generations}, workers={workers}, "
+        f"orderliness_limits={orderliness_limits.as_dict()}, "
+        "mutation="
+        f"{args.mutation_individual_prob:.2f}×"
+        f"({args.mutation_local_weight:.2f}/"
+        f"{args.mutation_meso_weight:.2f}/"
+        f"{args.mutation_macro_weight:.2f}), "
+        f"memetic={args.memetic_interval}世代ごと×"
+        f"{args.memetic_parents}非劣解×{args.memetic_neighbors}近傍"
+    )
 
-    t0 = time.perf_counter()
+    initial_designs = None
+
+    jit_started = time.perf_counter()
+    warmup_routing_kernels()
+    print(f"経路探索JIT準備: {time.perf_counter() - jit_started:.1f}s")
+
+    def execute(runner=None):
+        return run_direct_nsga2(
+            cfg=cfg,
+            pop_size=args.pop,
+            n_gen=args.gen,
+            elementwise_runner=runner,
+            seed=args.seed,
+            orderliness_limits=orderliness_limits,
+            max_orderliness=args.max_orderliness,
+            initial_max_trials=args.initial_max_trials,
+            initial_genotypes=initial_designs,
+            mutation_individual_prob=args.mutation_individual_prob,
+            mutation_local_weight=args.mutation_local_weight,
+            mutation_meso_weight=args.mutation_meso_weight,
+            mutation_macro_weight=args.mutation_macro_weight,
+            memetic_interval=args.memetic_interval,
+            memetic_parents=args.memetic_parents,
+            memetic_neighbors=args.memetic_neighbors,
+            memetic_max_neighbor_trials=args.memetic_max_neighbor_trials,
+        )
+
+    started = time.perf_counter()
     if workers > 1:
+        # 評価用Poolを初期集団とMemetic近傍の構成にも再利用する。
+        preparation_started = time.perf_counter()
         with Pool(workers, initializer=init_worker, initargs=(cfg,)) as pool:
-            runner = StarmapParallelization(pool.starmap)
-            res = run_nsga2(cfg, pop_size=args.pop, n_gen=args.gen, elementwise_runner=runner)
+            pool_starmap = partial(pool.starmap, chunksize=1)
+            initial_designs = prepare_random_feasible_direct_population(
+                cfg,
+                pop_size=int(args.pop or cfg.population_size),
+                seed=args.seed,
+                orderliness_limits=orderliness_limits,
+                max_orderliness=args.max_orderliness,
+                initial_max_trials=args.initial_max_trials,
+                starmap=pool_starmap,
+            )
+            print(
+                "ランダム制約充足初期集団の準備: "
+                f"{time.perf_counter() - preparation_started:.1f}s"
+            )
+            result = execute(
+                StarmapParallelization(pool_starmap)
+            )
     else:
-        res = run_nsga2(cfg, pop_size=args.pop, n_gen=args.gen)
-    elapsed = time.perf_counter() - t0
-    print(f"\n最適化完了: {elapsed:.1f}s / パレート解 {np.atleast_2d(res.F).shape[0]} 件")
-
-    # --- §19 成果物
-    rep_layouts = save_results(cfg, res, out)
-    F = np.atleast_2d(res.F)
-    reps = select_representatives(F)
-    
-    # 最適化ログ(世代別の目的値集計は verbose 出力に委ね、最終集団を保存)
-    pd.DataFrame(F, columns=["f_move", "f_congestion"]).to_csv(
-        out / "optimization_log.csv", index_label="pareto_index"
-    )
-    
-    # -------------------------------------------------------------
-    # 世代ごとのHypervolume（HV）
-    # -------------------------------------------------------------
-    # 全世代で同じ参照点を使用する。
-    # 参照点は、全世代の実行可能解の最大目的値に、
-    # 目的値レンジの10%分の余白を加えて自動設定する。
-    hv_history, hv_reference_point = calculate_hv_history(
-        res,
-        reference_margin=0.1,
-    )
-
-    # 世代ごとのHVをCSVへ保存
-    hv_history.to_csv(
-        out / "hv_history.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-
-    # HVの世代推移をresultsフォルダへ保存
-    plot_hypervolume_history(
-        hv_history,
-        out / "hypervolume_over_generations.png",
-    )
-
-    # コンソールにも参照点と最終世代HVを表示
-    print("\n=== Hypervolume ===")
-
-    print(
-        "reference point = "
-        f"({hv_reference_point[0]:.6g}, "
-        f"{hv_reference_point[1]:.6g})"
-    )
-
-    print(
-        "final HV       = "
-        f"{hv_history['hypervolume'].iloc[-1]:.6g}"
-    )
-
-    # --- §20 代表 3 案の可視化・比較表(最適化終了後に再評価)
-    ctx = build_context(cfg)
-    jp = {"best_movement": "移動重視", "knee": "バランス", "best_congestion": "混雑重視"}
-    table_src = {}
-    representative_results = {}
-    for name in ("best_movement", "knee", "best_congestion"):
-        positions = tuple(tuple(p) for p in rep_layouts[name]["positions"])
-        r = evaluate_layout(ctx, positions, collect_heatmap=True)
-        representative_results[name] = r
-        layout = apply_layout(cfg, ctx.venue, positions)
-        plot_heatmaps(
-            cfg, layout, r.heatmap, r.over_threshold_map,
-            out / f"heatmap_{name}.png", title=jp[name],
+        preparation_started = time.perf_counter()
+        initial_designs = prepare_random_feasible_direct_population(
+            cfg,
+            pop_size=int(args.pop or cfg.population_size),
+            seed=args.seed,
+            orderliness_limits=orderliness_limits,
+            max_orderliness=args.max_orderliness,
+            initial_max_trials=args.initial_max_trials,
         )
-        table_src[jp[name]] = {**r.kpis, "f_congestion": r.f_congestion}
-        
-    # =============================================================
-    # 以下は，初期解と選択済み最適解の時系列比較
-    # =============================================================
-    # NSGA-IIの初期集団生成と同じ変数範囲
-    lower_bounds, upper_bounds = variable_bounds(cfg)
+        print(
+            "ランダム制約充足初期集団の準備: "
+            f"{time.perf_counter() - preparation_started:.1f}s"
+        )
+        result = execute()
+    elapsed = time.perf_counter() - started
 
-    # ValidLayoutSamplingと同じ乱数系列を使用する。
-    # これにより初期集団の第1有効配置を再現する。
-    initial_x = sample_valid_layout(
-        sampling_rng(cfg.evaluation_seed),
-        lower_bounds,
-        upper_bounds,
+    F = np.atleast_2d(np.asarray(result.F, dtype=float))
+    print(
+        f"\n138次元・直接表現NSGA-II完了: {elapsed:.1f}s / "
+        f"パレート解 {len(F)} 件"
+    )
+
+    representative_layouts = save_results(cfg, result, out)
+    save_direct_metadata(result, out)
+    representatives = select_representatives(F)
+
+    pd.DataFrame(
+        {
+            "f_move": F[:, 0],
+            "f_congestion": F[:, 1],
+            "orderliness": np.asarray(result.orderliness_scores, dtype=float),
+            **{
+                key: [item[key] for item in result.orderliness_components]
+                for key in ORDERLINESS_COMPONENT_KEYS
+            },
+        }
+    ).to_csv(out / "optimization_log.csv", index_label="pareto_index")
+
+    hv_history, hv_reference_point = calculate_hv_history(result, reference_margin=0.1)
+    hv_history.to_csv(out / "hv_history.csv", index=False, encoding="utf-8-sig")
+    plot_hypervolume_history(hv_history, out / "hypervolume_over_generations.png")
+
+    # 最適化で使用した初期化規則と同じ、第1ランダム制約充足個体。
+    initial_design, initial_orderliness = _random_initial_layout(
         cfg,
-        ctx.venue,
+        seed=args.seed,
+        limits=orderliness_limits,
+        max_orderliness=args.max_orderliness,
+        max_trials=args.initial_max_trials,
+    )
+    ctx = build_context(cfg)
+    initial_positions = tuple(
+        tuple(int(v) for v in p) for p in initial_design.reshape(-1, 3)
+    )
+    initial_result = evaluate_layout(ctx, initial_positions)
+    initial_f = np.asarray(
+        [initial_result.f_move, initial_result.f_congestion], dtype=float
+    )
+    (out / "random_initial_layout.json").write_text(
+        json.dumps(
+            {
+                "design_vector_138": [int(v) for v in initial_design],
+                "positions": [list(map(int, p)) for p in initial_positions],
+                "orderliness": initial_orderliness,
+                "f_move": float(initial_f[0]),
+                "f_congestion": float(initial_f[1]),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
 
-    # sample_valid_layout が返す初期個体は既に整数ベクトル。
-    # シミュレーション用の配置タプルへ変換する。
-    initial_positions = to_integer_layout(initial_x)
-
-    # 初期解をシミュレーション
-    initial_result = evaluate_layout(
-        ctx,
-        initial_positions,
-    )
-    
-    # -------------------------------------------------------------
-    # 初期解の目的関数値
-    # -------------------------------------------------------------
-    initial_f = np.array(
-        [
-            initial_result.f_move,
-            initial_result.f_congestion,
-        ],
-        dtype=float,
-    )
-
-    print("\n=== パレートフロント比較用の初期解 ===")
-    print(f"f_move       = {initial_f[0]:.6f}")
-    print(f"f_congestion = {initial_f[1]:.6e}")
-
-    # -------------------------------------------------------------
-    # パレート解・代表解・初期解を同じグラフに表示
-    # -------------------------------------------------------------
-        # -------------------------------------------------------------
-    # booths.yaml に記載された固定配置を評価
-    # -------------------------------------------------------------
-    missing_fixed_positions = [
-        booth.booth_id
-        for booth in cfg.booths
-        if booth.fixed_position is None
-    ]
-
-    if missing_fixed_positions:
-        raise ValueError(
-            "booths.yaml の fixed_position が未設定のブースがあります: "
-            f"{missing_fixed_positions}"
-        )
-
-    # booths.yaml の fixed_position をシミュレーション用の形式に変換する。
-    # fixed_positions:
-    # ((x1, y1, theta1), (x2, y2, theta2), ...)
+    # booths.yaml は初期化には使わず、最適化後の比較対象としてのみ評価する。
     fixed_positions = tuple(
         tuple(int(v) for v in booth.fixed_position)
         for booth in cfg.booths
+        if booth.fixed_position is not None
     )
-
-    # booths.yaml の配置が制約を満たしているか確認する。
-    fixed_violation = compute_violation(
-        cfg,
-        ctx.venue,
-        fixed_positions,
-    )
-
+    if len(fixed_positions) != len(cfg.booths):
+        raise ValueError("比較用fixed_positionが未設定の配置物があります")
+    fixed_violation = compute_violation(cfg, ctx.venue, fixed_positions)
     if fixed_violation > 0:
-        raise ValueError(
-            "booths.yaml の固定配置が制約を満たしていません: "
-            f"g = {fixed_violation}"
+        raise ValueError(f"booths.yamlの比較用固定配置が制約違反です: g={fixed_violation}")
+    fixed_orderliness = compute_direct_orderliness(
+        cfg,
+        np.asarray(fixed_positions).reshape(-1),
+        limits=result.orderliness_limits,
+    )
+    if float(fixed_orderliness["total"]) > 1.0:
+        print(
+            "警告: 指定された受容可能性上限ではbooths.yamlが探索可能領域外です: "
+            f"orderliness={float(fixed_orderliness['total']):.6g}"
         )
+    else:
+        print(
+            "booths.yaml探索空間確認: "
+            f"orderliness={float(fixed_orderliness['total']):.6g} <= 1"
+        )
+    fixed_result = evaluate_layout(ctx, fixed_positions)
+    fixed_f = np.asarray([fixed_result.f_move, fixed_result.f_congestion], dtype=float)
 
-    # 最適化解やランダム解と同じ条件で固定配置を評価する。
-    fixed_result = evaluate_layout(
-        ctx,
-        fixed_positions,
-    )
-
-    fixed_f = np.array(
-        [
-            fixed_result.f_move,
-            fixed_result.f_congestion,
-        ],
-        dtype=float,
-    )
-
-    print("\n=== booths.yaml の固定配置 ===")
-    print(f"f_move       = {fixed_f[0]:.6f}")
-    print(f"f_congestion = {fixed_f[1]:.6e}")
-
-    # -------------------------------------------------------------
-    # パレート解・代表解・初期解・固定配置を同じグラフに表示
-    # -------------------------------------------------------------
     plot_pareto_front(
         F=F,
-        reps=reps,
+        reps=representatives,
         path=out / "pareto_front.png",
         initial_f=initial_f,
         fixed_f=fixed_f,
     )
 
-    # -------------------------------------------------------------
-    # 比較対象とする選択済み最適解
-    # -------------------------------------------------------------
-    # 選択肢：
-    #   "best_movement"   : 移動重視解
-    #   "knee"            : バランス解
-    #   "best_congestion" : 混雑重視解
-    selected_name = "knee"
+    japanese_names = {
+        "best_movement": "移動重視",
+        "knee": "バランス",
+        "best_congestion": "混雑重視",
+    }
+    output_stems = {
+        "best_movement": "best_movement",
+        "knee": "knee",
+        "best_congestion": "best_congestion",
+    }
+    table_source = {}
+    orderliness_diagnostics = {}
+    representative_results = {}
+    for name in ("best_movement", "knee", "best_congestion"):
+        positions = tuple(
+            tuple(int(v) for v in p)
+            for p in representative_layouts[name]["positions"]
+        )
+        evaluated = evaluate_layout(ctx, positions, collect_heatmap=True)
+        representative_results[name] = evaluated
+        layout = apply_layout(cfg, ctx.venue, positions)
+        plot_heatmaps(
+            cfg,
+            layout,
+            evaluated.heatmap,
+            evaluated.over_threshold_map,
+            out / f"heatmap_{output_stems[name]}.png",
+            title=japanese_names[name],
+        )
+        table_source[japanese_names[name]] = {
+            **evaluated.kpis,
+            "f_congestion": evaluated.f_congestion,
+            "orderliness": float(result.orderliness_scores[representatives[name]]),
+            **{
+                key: float(result.orderliness_components[representatives[name]][key])
+                for key in ORDERLINESS_COMPONENT_KEYS
+            },
+        }
+        orderliness_diagnostics[name] = result.orderliness_components[
+            representatives[name]
+        ]
 
-    selected_result = representative_results[selected_name]
-
-    # 2種類の時系列グラフを保存
+    table_source["ランダム初期解"] = {
+        **initial_result.kpis,
+        "f_congestion": initial_result.f_congestion,
+        "orderliness": float(initial_orderliness["total"]),
+        **{
+            key: float(initial_orderliness[key])
+            for key in ORDERLINESS_COMPONENT_KEYS
+        },
+    }
+    orderliness_diagnostics["random_initial"] = initial_orderliness
+    table_source["booths.yaml比較配置"] = {
+        **fixed_result.kpis,
+        "f_congestion": fixed_result.f_congestion,
+        "orderliness": float(fixed_orderliness["total"]),
+        **{
+            key: float(fixed_orderliness[key])
+            for key in ORDERLINESS_COMPONENT_KEYS
+        },
+    }
+    orderliness_diagnostics["booths_yaml"] = fixed_orderliness
+    (out / "orderliness_diagnostics.json").write_text(
+        json.dumps(orderliness_diagnostics, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    table = comparison_table(table_source, out / "comparison_table.csv")
     plot_time_series_comparison(
         initial_result=initial_result,
         representative_results=representative_results,
         congestion_path=out / "congestion_over_time.png",
         movement_path=out / "movement_burden_over_time.png",
     )
-    table = comparison_table(table_src, out / "comparison_table.csv")
-    print("\n=== 代表 3 案の比較(§20.3) ===")
+
+    print("\n=== Hypervolume ===")
+    print(f"reference point = ({hv_reference_point[0]:.6g}, {hv_reference_point[1]:.6g})")
+    print(f"final HV       = {hv_history['hypervolume'].iloc[-1]:.6g}")
+    print("\n=== 代表解・初期解・比較配置 ===")
     print(table.to_string())
     print(f"\n成果物: {out}/")
 
 
-if __name__ == "__main__":  # §16.3 Windows 対応ガード
+if __name__ == "__main__":
     main()

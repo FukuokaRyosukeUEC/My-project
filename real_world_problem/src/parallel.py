@@ -14,6 +14,7 @@ import numpy as np
 
 from .constraints import compute_violation, to_integer_layout
 from .models import Config
+from .routing import warmup_routing_kernels
 from .simulator import SimResult, Simulation
 from .venue import Venue, apply_layout, build_base_venue
 from .visitors import generate_visitor_table
@@ -41,12 +42,15 @@ def build_context(cfg: Config) -> StaticContext:
 
 # --- ワーカープロセス内キャッシュ(プロセスごとに 1 回だけ構築)
 _CTX: StaticContext | None = None
+_EVALUATION_CACHE: dict[tuple, SimResult] = {}
 
 
 def init_worker(cfg: Config) -> None:
     """multiprocessing.Pool の initializer。"""
-    global _CTX
+    global _CTX, _EVALUATION_CACHE
+    warmup_routing_kernels()
     _CTX = build_context(cfg)
+    _EVALUATION_CACHE = {}
 
 
 def get_context(cfg: Config) -> StaticContext:
@@ -61,10 +65,33 @@ def evaluate_layout(
     ctx: StaticContext,
     positions: tuple,
     collect_heatmap: bool = False,
+    collect_time_series: bool = True,
     record_frames: bool = False,
     frame_interval: int = 1,
+    use_cache: bool = True,
 ) -> SimResult:
     """有効配置を 1 回シミュレーションする(§2.3: 1 配置 1 シミュレーション)。"""
+    positions = tuple(tuple(int(v) for v in pos) for pos in positions)
+    cache_key = (
+        ctx.cfg,
+        positions,
+        bool(collect_heatmap),
+        bool(collect_time_series),
+        bool(record_frames),
+        int(frame_interval),
+    )
+    # GA中の軽量結果だけをキャッシュする。ヒートマップ・時系列・フレームは
+    # 呼出側が可視化で扱うため、共有オブジェクト化せず毎回新規生成する。
+    cacheable = (
+        use_cache
+        and not collect_heatmap
+        and not collect_time_series
+        and not record_frames
+    )
+    if cacheable:
+        cached = _EVALUATION_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     layout = apply_layout(ctx.cfg, ctx.venue, positions)
     sim = Simulation(
         ctx.cfg,
@@ -72,10 +99,14 @@ def evaluate_layout(
         layout,
         ctx.visitor_records,
         collect_heatmap=collect_heatmap,
+        collect_time_series=collect_time_series,
         record_frames=record_frames,
         frame_interval=frame_interval,
     )
-    return sim.run()
+    result = sim.run()
+    if cacheable and not result.timed_out:
+        _EVALUATION_CACHE[cache_key] = result
+    return result
 
 
 def evaluate_vector(
@@ -109,6 +140,7 @@ def evaluate_vector(
     res = evaluate_layout(
         ctx,
         positions,
+        collect_time_series=False,
     )
 
     if res.timed_out:
@@ -129,4 +161,7 @@ def evaluate_vector(
 
 def default_workers() -> int:
     """§16.4: 並列数の既定値。"""
-    return max(1, (os.cpu_count() or 2) - 1)
+    # WSL等で論理CPU数が大きく見える場合、全コア-1個のプロセス生成は
+    # デコーダ/BFS用メモリとプロセス間転送の負荷が大きい。実測上の安全な
+    # 既定値を8とし、より多く使う場合は--workersで明示する。
+    return min(8, max(1, (os.cpu_count() or 2) - 1))

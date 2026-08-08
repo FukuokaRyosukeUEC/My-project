@@ -308,3 +308,5 @@ git push
 まず `python scripts/run_optimization.py --pop 16 --gen 8 --workers 4` で
 設定と実行環境を確認し、必要に応じて `config/default_config.yaml` の
 個体数・世代数を調整する。
+
+
