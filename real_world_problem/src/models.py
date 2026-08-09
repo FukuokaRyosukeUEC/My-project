@@ -37,6 +37,7 @@ QUEUING = 3
 EXPERIENCING = 4
 EXITING = 5
 FINISHED = 6
+RESTING = 7
 
 #: BFS/A* の到達不能を表す距離値
 INF_DIST = np.int32(2**30)
@@ -50,15 +51,15 @@ class BoothSpec:
     kind:
         booth       : 通常の体験ブース(受付・待機列あり)
         kitchen_car : キッチンカー(挙動はブースと同じ。色分け用の属性)
-        table       : テーブル・椅子。セルを占有するだけで、受付・待機列・
-                      体験は持たず、来場者の目的地候補にもならない。
+        table       : 方向・専用出入口を持たないテーブル・椅子。周囲4辺から
+                      着席して疲労を回復する。capacity は同時着席可能人数。
     theme:
         normal / music(音楽祭関連)。色分け用の属性。
     area:
         所属広場(venue_shape.areas の name)。空なら制約なし。
         指定時はブース本体セルがその広場内に収まることが配置制約になる。
     fixed_position:
-        最適化前の固定配置パターンでの左上座標・向き (x, y, theta)。None なら未指定。
+        最適化前の固定配置パターン。通常ブースは (x,y,theta)、テーブルは (x,y)。
         theta は 0=北, 1=東, 2=南, 3=西(venue.py の THETA_*)。
         最適化実行時は使用されない(座標・向きは最適化変数)。
     """
@@ -79,7 +80,7 @@ class BoothSpec:
 
     @property
     def is_table(self) -> bool:
-        """来場者と相互作用しない占有物(テーブル・椅子)か。"""
+        """休憩・飲食に利用できるテーブル（ベンチ）か。"""
         return self.kind == "table"
 
 
@@ -147,6 +148,17 @@ class Config:
     replan_interval_steps: int = 10
     blocked_replan_count: int = 3
     blocked_congestion_weight: float = 0.00005
+    congestion_travel_time_weight: float = 1.0
+    # テーブル利用・疲労
+    table_rest_seconds: float = 45.0
+    table_after_food_probability: float = 0.65
+    table_after_categories: tuple = ("food",)
+    fatigue_rest_threshold: float = 0.65
+    fatigue_walk_per_second: float = 0.0025
+    fatigue_wait_per_second: float = 0.0008
+    fatigue_experience_per_second: float = 0.0004
+    fatigue_recovery_per_second: float = 0.015
+    table_occupancy_weight: float = 0.5
     # 効用(§8)
     softmax_temperature: float = 0.3
     q_norm_seconds: float = 600.0
@@ -165,6 +177,8 @@ class Config:
     hap_alpha: float = 0.05
     hap_beta: float = 0.1
     hap_gamma: float = 0.3
+    hap_rest_bonus: float = 0.15
+    hap_fatigue_penalty: float = 0.5
     # 最適化(§15)
     population_size: int = 100
     n_generations: int = 100
@@ -233,6 +247,19 @@ def load_config(config_dir: str | Path) -> Config:
     booth_raw = yaml.safe_load((d / "booths.yaml").read_text(encoding="utf-8"))["booths"]
     prof_raw = yaml.safe_load((d / "visitor_profiles.yaml").read_text(encoding="utf-8"))["profiles"]
 
+    def _fixed_position(item) -> tuple | None:
+        raw = item.get("fixed_position")
+        if raw is None:
+            return None
+        values = tuple(int(value) for value in raw)
+        if str(item.get("kind", "booth")) == "table":
+            if len(values) != 2:
+                raise ValueError("table fixed_position must be [x, y]")
+            return values + (0,)
+        if len(values) != 3:
+            raise ValueError("booth fixed_position must be [x, y, theta]")
+        return values
+
     booths = tuple(
         BoothSpec(
             booth_id=int(b["booth_id"]),
@@ -240,18 +267,16 @@ def load_config(config_dir: str | Path) -> Config:
             height=int(b["height"]),
             category=str(b.get("category", "none")),
             attractiveness=float(b.get("attractiveness", 0.0)),
-            capacity=int(b.get("capacity", 0)),
+            capacity=int(
+                b.get("capacity", 4 if str(b.get("kind", "booth")) == "table" else 0)
+            ),
             mean_service_seconds=float(b.get("mean_service_seconds", 0.0)),
             max_queue_length=int(b.get("max_queue_length", 0)),
             name=str(b.get("name", "")),
             kind=str(b.get("kind", "booth")),
             theme=str(b.get("theme", "normal")),
             area=str(b.get("area", "")),
-            fixed_position=(
-                tuple(int(v) for v in b["fixed_position"])
-                if b.get("fixed_position") is not None
-                else None
-            ),
+            fixed_position=_fixed_position(b),
         )
         for b in booth_raw
     )
@@ -289,6 +314,8 @@ def load_config(config_dir: str | Path) -> Config:
         return tuple((int(x), int(y)) for x, y in (main["entrance_exit"].get(key) or []))
 
     uw = main["utility_weights"]
+    resting = main.get("resting") or {}
+    happiness_cfg = main.get("happiness") or {}
     cfg = Config(
         grid_width=int(main["grid"]["width"]),
         grid_height=int(main["grid"]["height"]),
@@ -331,6 +358,26 @@ def load_config(config_dir: str | Path) -> Config:
         replan_interval_steps=int(main["simulation"]["replan_interval_steps"]),
         blocked_replan_count=int(main["simulation"]["blocked_replan_count"]),
         blocked_congestion_weight=float(main["simulation"].get("blocked_congestion_weight", 0.00005)),
+        congestion_travel_time_weight=float(
+            main["simulation"].get("congestion_travel_time_weight", 1.0)
+        ),
+        table_rest_seconds=float(resting.get("rest_seconds", 45.0)),
+        table_after_food_probability=float(
+            resting.get("after_food_probability", 0.65)
+        ),
+        table_after_categories=tuple(
+            str(value) for value in resting.get("after_categories", ["food"])
+        ),
+        fatigue_rest_threshold=float(resting.get("fatigue_threshold", 0.65)),
+        fatigue_walk_per_second=float(resting.get("fatigue_walk_per_second", 0.0025)),
+        fatigue_wait_per_second=float(resting.get("fatigue_wait_per_second", 0.0008)),
+        fatigue_experience_per_second=float(
+            resting.get("fatigue_experience_per_second", 0.0004)
+        ),
+        fatigue_recovery_per_second=float(
+            resting.get("fatigue_recovery_per_second", 0.015)
+        ),
+        table_occupancy_weight=float(resting.get("occupancy_weight", 0.5)),
         softmax_temperature=float(main["simulation"]["softmax_temperature"]),
         q_norm_seconds=float(main["simulation"]["q_norm_seconds"]),
         giveup_utility_penalty=float(main["simulation"]["giveup_utility_penalty"]),
@@ -342,9 +389,11 @@ def load_config(config_dir: str | Path) -> Config:
         w_crowd=float(uw["crowd"]),
         arrival_profile=tuple(tuple(float(v) for v in row) for row in main["arrival_profile"]),
         min_corridor_width=int(main["constraints"]["min_corridor_width"]),
-        hap_alpha=float(main["happiness"]["alpha"]),
-        hap_beta=float(main["happiness"]["beta"]),
-        hap_gamma=float(main["happiness"]["gamma"]),
+        hap_alpha=float(happiness_cfg["alpha"]),
+        hap_beta=float(happiness_cfg["beta"]),
+        hap_gamma=float(happiness_cfg["gamma"]),
+        hap_rest_bonus=float(happiness_cfg.get("rest_bonus", 0.15)),
+        hap_fatigue_penalty=float(happiness_cfg.get("fatigue_penalty", 0.5)),
         population_size=int(main["optimization"]["population_size"]),
         n_generations=int(main["optimization"]["n_generations"]),
         booths=booths,
@@ -353,6 +402,16 @@ def load_config(config_dir: str | Path) -> Config:
     )
     if cfg.queue_capacity_per_cell < 1:
         raise ValueError("booth_geometry.queue_capacity_per_cell must be at least 1")
+    if cfg.congestion_travel_time_weight < 0.0:
+        raise ValueError("simulation.congestion_travel_time_weight must be non-negative")
+    if not 0.0 <= cfg.table_after_food_probability <= 1.0:
+        raise ValueError("resting.after_food_probability must be in [0, 1]")
+    if cfg.table_rest_seconds <= 0.0:
+        raise ValueError("resting.rest_seconds must be positive")
+    if not 0.0 <= cfg.fatigue_rest_threshold <= 1.0:
+        raise ValueError("resting.fatigue_threshold must be in [0, 1]")
+    if any(b.is_table and b.capacity < 1 for b in cfg.booths):
+        raise ValueError("table capacity must be at least 1")
     return cfg
 
 
@@ -381,11 +440,12 @@ class Visitor:
     interests: np.ndarray                # カテゴリ別興味 [0,1]
     distance_weight_factor: float
     profile_name: str
+    table_after_food_propensity: float = 1.0
     state: int = NOT_ARRIVED
     target_booth_id: int | None = None
     path: list = field(default_factory=list)   # list[tuple[int,int]](現在セルは含まない)
     path_index: int = 0
-    move_credit: float = 0.0
+    move_credit: float = 0.0             # セル進入に使う移動時間残高
     blocked_count: int = 0               # 連続移動失敗回数【v2】
     visited_booths: set = field(default_factory=set)   # 体験済み【v2】
     given_up_booths: set = field(default_factory=set)  # 諦め済み(効用減点対象)
@@ -398,3 +458,11 @@ class Visitor:
     current_queue_wait: float = 0.0      # 現在の待ち行列での待機秒数
     steps_since_plan: int = 0
     actual_spawn_step: int = -1          # 実際に入場したステップ(遅延込み)
+    # --- 疲労・テーブル利用 ---
+    fatigue: float = 0.0                 # 0=疲労なし, 1=最大疲労
+    peak_fatigue: float = 0.0
+    table_requested_after_food: bool = False
+    table_requests_after_food: int = 0
+    table_visit_count: int = 0
+    food_table_visit_count: int = 0
+    table_seconds: float = 0.0

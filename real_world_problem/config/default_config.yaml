@@ -74,10 +74,26 @@ simulation:
   timeout_seconds: 5.0       # §17.6
   replan_interval_steps: 10  # §9.3
   blocked_replan_count: 3    # §9.3
+  # セル占有率 r に対し、1セルの所要時間を (1 + weight * r^2) 倍する。
+  # weight=1.0 の場合、占有率50%で1.25倍、100%で2倍。
+  congestion_travel_time_weight: 1.0
   softmax_temperature: 0.3   # §8
   q_norm_seconds: 600.0      # §8 Q_norm
   giveup_utility_penalty: 0.5   # §8 諦めブースへの減点
   utility_min_threshold: 0.0    # §8 全候補がこの値未満なら EXITING
+
+# 疲労とテーブル（ベンチ）利用。
+# 疲労度は 0～1。歩行・待機・体験で増え、着席中に減る。
+resting:
+  rest_seconds: 45
+  after_food_probability: 0.65  # 飲食体験後にテーブルへ向かう来場者の割合
+  after_categories: [food]
+  fatigue_threshold: 0.65       # この疲労度以上でもテーブルを探す
+  fatigue_walk_per_second: 0.0025
+  fatigue_wait_per_second: 0.0008
+  fatigue_experience_per_second: 0.0004
+  fatigue_recovery_per_second: 0.015
+  occupancy_weight: 0.5         # テーブル選択時の満席度ペナルティ
 
 utility_weights:             # §8 既定重み
   interest: 1.0
@@ -96,6 +112,8 @@ happiness:                   # §13 補助KPI
   alpha: 0.05
   beta: 0.1
   gamma: 0.3
+  rest_bonus: 0.15
+  fatigue_penalty: 0.5
 
 optimization:                # §15
   population_size: 100

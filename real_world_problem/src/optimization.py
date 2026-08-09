@@ -22,8 +22,14 @@ from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.repair.rounding import RoundingRepair
 from pymoo.optimize import minimize
 
-from .constraints import compute_violation, to_integer_layout
-from .models import EMPTY, FORBIDDEN, Config
+from .constraints import (
+    booth_variable_indices,
+    compute_violation,
+    design_variable_count,
+    positions_to_design,
+    to_integer_layout,
+)
+from .models import EMPTY, FORBIDDEN, WALKABLE_TYPES, Config
 from .parallel import evaluate_vector
 from .rng import sampling_rng
 from .venue import (
@@ -33,6 +39,7 @@ from .venue import (
     position_bounds,
     queue_cells_of,
     reception_cell,
+    table_access_cells_of,
     VALID_THETAS,
 )
 
@@ -40,35 +47,37 @@ from .venue import (
 def variable_bounds(
     cfg: Config,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``(x, y, theta)`` の整数上下限を返す。
+    """通常ブース ``(x,y,theta)``、テーブル ``(x,y)`` の整数上下限を返す。
 
     x, y は4方向すべての配置可能範囲の和集合、
-    theta は0～3とする。
+    通常ブースのthetaは0～3。テーブルにはtheta変数を作らない。
     """
     xl = []
     xu = []
 
     for booth_id, _spec in enumerate(cfg.booths):
+        theta_values = (0,) if _spec.is_table else VALID_THETAS
         bounds = [
             position_bounds(
                 cfg,
                 booth_id,
                 theta,
             )
-            for theta in VALID_THETAS
+            for theta in theta_values
         ]
 
         xl += [
             min(b[0] for b in bounds),
             min(b[2] for b in bounds),
-            min(VALID_THETAS),
         ]
 
         xu += [
             max(b[1] for b in bounds),
             max(b[3] for b in bounds),
-            max(VALID_THETAS),
         ]
+        if not _spec.is_table:
+            xl.append(min(VALID_THETAS))
+            xu.append(max(VALID_THETAS))
 
     return (
         np.asarray(
@@ -95,7 +104,7 @@ class LayoutProblem(ElementwiseProblem):
         xl, xu = variable_bounds(cfg)
 
         super().__init__(
-            n_var=len(cfg.booths) * 3,
+            n_var=design_variable_count(cfg),
             n_obj=2,
             n_ieq_constr=1,
             xl=xl,
@@ -208,6 +217,7 @@ def _booth_claimed_cells(
             theta,
         )
     )
+    claimed.update(table_access_cells_of(cfg, booth_id, x, y, theta))
 
     return claimed
 
@@ -309,10 +319,13 @@ def _booth_fits(
         ):
             return False
 
-        if base[qy, qx] not in (
-            EMPTY,
-            FORBIDDEN,
-        ):
+        if base[qy, qx] not in (EMPTY, FORBIDDEN):
+            return False
+
+    for tx, ty in table_access_cells_of(cfg, booth_id, x, y, theta):
+        if not (0 <= tx < W and 0 <= ty < H):
+            return False
+        if int(base[ty, tx]) not in set(int(value) for value in WALKABLE_TYPES):
             return False
 
     for cx, cy in _booth_claimed_cells(
@@ -357,21 +370,17 @@ def _greedy_layout_attempt(
         ),
     )
 
-    layout = np.empty(
-        n_booths * 3,
-        dtype=np.int64,
-    )
+    positions = np.empty((n_booths, 3), dtype=np.int64)
 
     for booth_id in order:
         placed = False
 
         for _ in range(trials_per_booth):
-            theta = int(
-                rng.integers(
-                    min(VALID_THETAS),
-                    max(VALID_THETAS) + 1,
-                )
+            theta = 0 if cfg.booths[booth_id].is_table else int(
+                rng.integers(min(VALID_THETAS), max(VALID_THETAS) + 1)
             )
+
+            x_index, y_index, theta_index = booth_variable_indices(cfg, booth_id)
 
             xmin, xmax, ymin, ymax = position_bounds(
                 cfg,
@@ -381,22 +390,22 @@ def _greedy_layout_attempt(
 
             xmin = max(
                 xmin,
-                int(lower[booth_id, 0]),
+                int(lower[x_index]),
             )
 
             xmax = min(
                 xmax,
-                int(upper[booth_id, 0]),
+                int(upper[x_index]),
             )
 
             ymin = max(
                 ymin,
-                int(lower[booth_id, 1]),
+                int(lower[y_index]),
             )
 
             ymax = min(
                 ymax,
-                int(upper[booth_id, 1]),
+                int(upper[y_index]),
             )
 
             if (
@@ -437,11 +446,7 @@ def _greedy_layout_attempt(
                 ):
                     occupied[cy, cx] = True
 
-                base = 3 * booth_id
-
-                layout[base] = x
-                layout[base + 1] = y
-                layout[base + 2] = theta
+                positions[booth_id] = (x, y, theta)
 
                 placed = True
                 break
@@ -449,7 +454,7 @@ def _greedy_layout_attempt(
         if not placed:
             return None
 
-    return layout
+    return positions_to_design(cfg, positions)
 
 
 def sample_valid_layout(
@@ -463,21 +468,9 @@ def sample_valid_layout(
     """角度を含む有効配置を貪欲法でサンプリングする。"""
     n_booths = len(cfg.booths)
 
-    lower = np.asarray(
-        lower_bounds,
-        dtype=np.int64,
-    ).reshape(
-        n_booths,
-        3,
-    )
+    lower = np.asarray(lower_bounds, dtype=np.int64).reshape(-1)
 
-    upper = np.asarray(
-        upper_bounds,
-        dtype=np.int64,
-    ).reshape(
-        n_booths,
-        3,
-    )
+    upper = np.asarray(upper_bounds, dtype=np.int64).reshape(-1)
 
     trials_per_booth = max(
         150,
@@ -502,7 +495,7 @@ def sample_valid_layout(
         if layout is None:
             continue
 
-        positions = to_integer_layout(layout)
+        positions = to_integer_layout(layout, cfg)
 
         if compute_violation(
             cfg,
@@ -603,23 +596,20 @@ class RandomValidBoothMutation(Mutation):
                 ):
                     continue
 
-                base = 3 * booth_id
-
-                old_state = tuple(
-                    int(v)
-                    for v in current[
-                        base:base + 3
-                    ]
+                x_index, y_index, theta_index = booth_variable_indices(
+                    self.cfg, booth_id
+                )
+                old_state = (
+                    int(current[x_index]),
+                    int(current[y_index]),
+                    0 if theta_index is None else int(current[theta_index]),
                 )
 
                 for _ in range(
                     self.max_position_trials
                 ):
-                    theta = int(
-                        rng.integers(
-                            min(VALID_THETAS),
-                            max(VALID_THETAS) + 1,
-                        )
+                    theta = 0 if theta_index is None else int(
+                        rng.integers(min(VALID_THETAS), max(VALID_THETAS) + 1)
                     )
 
                     xmin, xmax, ymin, ymax = (
@@ -661,12 +651,13 @@ class RandomValidBoothMutation(Mutation):
 
                     candidate = current.copy()
 
-                    candidate[
-                        base:base + 3
-                    ] = new_state
+                    candidate[x_index] = new_x
+                    candidate[y_index] = new_y
+                    if theta_index is not None:
+                        candidate[theta_index] = theta
 
                     positions = to_integer_layout(
-                        candidate
+                        candidate, self.cfg
                     )
 
                     if compute_violation(
@@ -904,6 +895,7 @@ class MemeticNSGA2(NSGA2):
                 len(self.cfg.booths)
             )
             for dx, dy, dtheta in self.BASIC_MOVES
+            if not self.cfg.booths[booth_id].is_table or dtheta == 0
         ]
 
         neighbors: list[np.ndarray] = []
@@ -923,9 +915,9 @@ class MemeticNSGA2(NSGA2):
                 move_id
             ]
 
-            x_index = 3 * booth_id
-            y_index = x_index + 1
-            theta_index = x_index + 2
+            x_index, y_index, theta_index = booth_variable_indices(
+                self.cfg, booth_id
+            )
 
             new_x = (
                 int(original[x_index])
@@ -938,9 +930,9 @@ class MemeticNSGA2(NSGA2):
             )
 
             new_theta = (
-                int(original[theta_index])
-                + dtheta
-            ) % 4
+                (int(original[theta_index]) + dtheta) % 4
+                if theta_index is not None else 0
+            )
 
             if not (
                 int(lower[x_index])
@@ -956,7 +948,8 @@ class MemeticNSGA2(NSGA2):
 
             candidate[x_index] = new_x
             candidate[y_index] = new_y
-            candidate[theta_index] = new_theta
+            if theta_index is not None:
+                candidate[theta_index] = new_theta
 
             key = tuple(
                 int(value)
@@ -969,7 +962,7 @@ class MemeticNSGA2(NSGA2):
                 continue
 
             positions = to_integer_layout(
-                candidate
+                candidate, self.cfg
             )
 
             # 全制約を満たさない基本近傍は評価しない。
@@ -1582,7 +1575,7 @@ def select_representatives(F: np.ndarray) -> dict[str, int]:
 
 
 def save_results(cfg: Config, res, out_dir: str | Path) -> dict:
-    """§19.1 の成果物一式を書き出す。戻り値は代表解 {名前: 12 次元 list}。"""
+    """§19.1 の成果物一式を書き出し、代表解を返す。"""
     from .parallel import build_context, evaluate_layout  # 遅延 import
 
     out = Path(out_dir)
@@ -1597,7 +1590,7 @@ def save_results(cfg: Config, res, out_dir: str | Path) -> dict:
     ctx = build_context(cfg)
     rows = []
     for x, f in zip(X, F):
-        positions = to_integer_layout(x)
+        positions = to_integer_layout(x, cfg)
         r = evaluate_layout(ctx, positions)
         row = {
             f"x{j}": int(v)
@@ -1631,7 +1624,7 @@ def save_results(cfg: Config, res, out_dir: str | Path) -> dict:
             ],
             "positions": [
                 list(p)
-                for p in to_integer_layout(X[idx])
+                for p in to_integer_layout(X[idx], cfg)
             ],
             "f_move": float(F[idx, 0]),
             "f_congestion": float(F[idx, 1]),

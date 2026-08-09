@@ -29,6 +29,8 @@ def happiness(v, cfg: Config) -> float:
         - cfg.hap_alpha * walk_min
         - cfg.hap_beta * queue_min
         - cfg.hap_gamma * v.give_up_count
+        + cfg.hap_rest_bonus * v.table_visit_count
+        - cfg.hap_fatigue_penalty * v.fatigue
     )
 
 
@@ -55,6 +57,20 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
     total_exp = int(n_exp.sum())
     hap = np.array([happiness(v, cfg) for v in spawned]) if n_spawned else np.array([0.0])
     finished = sum(1 for v in spawned if v.state == FINISHED)
+    fatigue = np.array([v.fatigue for v in spawned]) if n_spawned else np.array([0.0])
+    peak_fatigue = (
+        np.array([v.peak_fatigue for v in spawned]) if n_spawned else np.array([0.0])
+    )
+    table_seconds = (
+        np.array([v.table_seconds for v in spawned]) if n_spawned else np.array([0.0])
+    )
+    table_visits = int(sum(v.table_visit_count for v in spawned))
+    food_table_requests = int(sum(v.table_requests_after_food for v in spawned))
+    food_table_visits = int(sum(v.food_table_visit_count for v in spawned))
+    table_capacity = int(sum(b.capacity for b in cfg.booths if b.is_table))
+    table_capacity_seconds = max(
+        1.0, table_capacity * max(1, sim.executed_steps) * cfg.dt_seconds
+    )
 
     # --- 目的関数 2: ブース周辺セルのみを対象にした混雑度
     denom_raw = max(1.0, float(cfg.n_steps * sim.n_walkable))
@@ -96,5 +112,19 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
         "exit_completion_rate": finished / n_spawned if n_spawned else 0.0,
         "mean_happiness": float(hap.mean()),
         "happiness_p10": float(np.percentile(hap, 10)) if n_spawned else 0.0,
+        "mean_final_fatigue": float(fatigue.mean()),
+        "mean_peak_fatigue": float(peak_fatigue.mean()),
+        "table_visit_total": table_visits,
+        "table_user_rate": (
+            sum(v.table_visit_count > 0 for v in spawned) / n_spawned
+            if n_spawned else 0.0
+        ),
+        "mean_table_seconds": float(table_seconds.mean()),
+        "table_seat_utilization": float(table_seconds.sum() / table_capacity_seconds),
+        "food_table_request_total": food_table_requests,
+        "food_table_visit_total": food_table_visits,
+        "food_table_followthrough_rate": (
+            food_table_visits / food_table_requests if food_table_requests else 1.0
+        ),
     }
     return f_move, f_congestion, kpis

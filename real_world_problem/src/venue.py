@@ -63,8 +63,12 @@ def oriented_booth_size(
     theta: int,
 ) -> tuple[int, int]:
     """向きを反映したブース本体の (幅, 高さ) を返す。"""
-    theta = _validate_theta(theta)
     spec = cfg.booths[booth_id]
+
+    if spec.is_table:
+        return spec.width, spec.height
+
+    theta = _validate_theta(theta)
 
     if theta in (
         THETA_NORTH,
@@ -126,6 +130,7 @@ class Layout:
     receptions: tuple             # ブースごとの受付セル (x, y)(§5.1)
     booth_exits: tuple             # ブース体験後に再出現するセル (x, y)
     queue_cells: tuple            # ブースごとの待ち行列セル列 ((x,y),...)(§5.2)
+    table_access_cells: tuple      # テーブル周囲4辺の利用可能セル列
 
 
 def _points_in_polygon(px: np.ndarray, py: np.ndarray, polygon) -> np.ndarray:
@@ -296,7 +301,7 @@ def reception_cell(
     by: int,
     theta: int,
 ) -> tuple[int, int] | None:
-    """角度を反映したブース受付セルを返す。テーブルは None。"""
+    """角度を反映したブース受付セルを返す。テーブルはNone。"""
     relative = _south_reception_relative(
         cfg,
         booth_id,
@@ -325,7 +330,7 @@ def booth_exit_cell(
     by: int,
     theta: int,
 ) -> tuple[int, int] | None:
-    """角度を反映した体験後退出セルを返す。テーブルは None。"""
+    """角度を反映した体験後退出/テーブル離席セルを返す。"""
     spec = cfg.booths[booth_id]
 
     if spec.is_table:
@@ -506,6 +511,31 @@ def booth_cells_of(
     ]
 
 
+def table_access_cells_of(
+    cfg: Config,
+    booth_id: int,
+    bx: int,
+    by: int,
+    theta: int = 0,
+) -> tuple[tuple[int, int], ...]:
+    """テーブルの北・東・南・西4辺に隣接する全セルを返す。
+
+    専用の受付・出入口は設けず、各辺のどの隣接セルからも着席・離席できる。
+    ``theta`` はAPI互換のため受け取るが、テーブルの形状・アクセスには使わない。
+    """
+    spec = cfg.booths[booth_id]
+    if not spec.is_table:
+        return ()
+    width, height = spec.width, spec.height
+    cells = [
+        *((x, by - 1) for x in range(bx, bx + width)),
+        *((bx + width, y) for y in range(by, by + height)),
+        *((x, by + height) for x in range(bx, bx + width)),
+        *((bx - 1, y) for y in range(by, by + height)),
+    ]
+    return tuple(dict.fromkeys(cells))
+
+
 def position_bounds(
     cfg: Config,
     booth_id: int,
@@ -548,6 +578,7 @@ def position_bounds(
             theta,
         )
     )
+    cells += list(table_access_cells_of(cfg, booth_id, 0, 0, theta))
 
     xs = [
         x
@@ -579,6 +610,7 @@ def apply_layout(
     receptions = []
     booth_exits = []
     queue_cells = []
+    table_access_cells = []
 
     for bid, (
         bx,
@@ -624,6 +656,9 @@ def apply_layout(
         )
 
         queue_cells.append(qcells)
+        table_access_cells.append(
+            table_access_cells_of(cfg, bid, bx, by, theta)
+        )
 
         for qx, qy in qcells:
             grid[qy, qx] = QUEUE
@@ -648,4 +683,5 @@ def apply_layout(
         receptions=tuple(receptions),
         booth_exits=tuple(booth_exits),
         queue_cells=tuple(queue_cells),
+        table_access_cells=tuple(table_access_cells),
     )

@@ -1,9 +1,10 @@
-"""138次元の直接座標・向き表現による1層型NSGA-II。
+"""通常ブース3変数・テーブル2変数の直接表現による1層型NSGA-II。
 
-46配置物の ``(x, y, theta)`` をそのまま染色体に保持するため、設計変数は
-46×3=138次元である。配置文法や階層デコーダは使用せず、整然さは最終配置の
+通常ブースは ``(x,y,theta)``、方向を持たないテーブルは ``(x,y)`` を染色体に
+保持する。本設定では28×3+18×2=120次元である。整然さは最終配置の
 幾何形状から計算した制約として扱う。初期集団はbooths.yamlを参照せず、
-物理制約と整然さ制約を満たすランダム配置だけで生成する。
+位置・向きを一様乱数で決め、物理制約だけを満たす完全ランダム
+配置から生成する。整然さは初期化に埋め込まず、探索中の制約として扱う。
 """
 from __future__ import annotations
 
@@ -24,8 +25,11 @@ from pymoo.optimize import minimize
 
 from .constraints import (
     PlacementGeometry,
+    booth_variable_indices,
     build_placement_geometry,
     compute_violation,
+    design_variable_count,
+    positions_to_design,
     to_integer_layout,
 )
 from .models import WALKABLE_TYPES, Config
@@ -33,6 +37,7 @@ from .optimization import (
     ObjectiveHistoryCallback,
     _booth_claimed_cells,
     _booth_fits,
+    sample_valid_layout,
     variable_bounds,
 )
 from .parallel import PENALTY_OBJECTIVE, evaluate_layout, get_context
@@ -47,12 +52,12 @@ from .venue import (
 
 
 LANE_ALIGNMENT_TOLERANCE_CELLS = 1.0
-MAX_LANE_EDGE_GAP_CELLS = 10.0
+MAX_LANE_EDGE_GAP_CELLS = 6.0
 MIN_STRONG_LANE_SIZE = 3
 BOUNDARY_BAND_CELLS = 5.0
-BOUNDARY_ALIGNMENT_TOLERANCE_CELLS = 2.0
+BOUNDARY_ALIGNMENT_TOLERANCE_CELLS = 4.0
 MIN_BOUNDARY_CHAIN_SIZE = 2
-MOTIF_TARGET_SIZE = 5
+MOTIF_TARGET_SIZE = 3
 FRONT_CLEARANCE_DEPTH_CELLS = 2
 CONSTRAINT_CACHE_MAXSIZE = 50_000
 ORDERLINESS_COMPONENT_KEYS = (
@@ -70,8 +75,8 @@ ORDERLINESS_COMPONENT_KEYS = (
 class OrderlinessLimits:
     """列・外周追従の双方を許す、説明可能な配置構造の成分別上限。"""
 
-    organization_nonmembership: float = 0.30
-    motif_complexity: float = 1.20
+    organization_nonmembership: float = 0.20
+    motif_complexity: float = 1.00
     alignment_error: float = 0.36
     gap_variation: float = 0.20
     orientation: float = 0.25
@@ -147,7 +152,7 @@ class BoundarySegment:
     inward_normal: np.ndarray
 
 
-# プロセスごとの厳密キャッシュ。キーは設定・閾値・138整数変数の完全一致で、
+# プロセスごとの厳密キャッシュ。キーは設定・閾値・全整数変数の完全一致で、
 # 近似や許容誤差による再利用は行わない。
 _CONSTRAINT_CACHE: OrderedDict[
     tuple, tuple[float, tuple[float, ...], dict[str, object]]
@@ -843,7 +848,7 @@ def compute_direct_orderliness(
     """列と外周追従を同格に扱う、最終表現上の受容可能性制約を計算する。"""
 
     effective_limits = limits or OrderlinessLimits()
-    positions = np.asarray(to_integer_layout(np.asarray(x)), dtype=np.int64)
+    positions = np.asarray(to_integer_layout(np.asarray(x), cfg), dtype=np.int64)
     centers, sizes = _booth_centers_and_sizes(cfg, positions)
     mixed_groups = [
         _group_orderliness(
@@ -892,7 +897,7 @@ def compute_direct_orderliness(
 
 
 class Direct138LayoutProblem(ElementwiseProblem):
-    """138整数変数・2目的・物理1本/受容可能性7本の制約付き配置問題。"""
+    """通常ブース3変数・テーブル2変数の制約付き直接配置問題。"""
 
     def __init__(
         self,
@@ -913,7 +918,7 @@ class Direct138LayoutProblem(ElementwiseProblem):
         self.venue = build_base_venue(cfg)
         xl, xu = variable_bounds(cfg)
         super().__init__(
-            n_var=len(cfg.booths) * 3,
+            n_var=design_variable_count(cfg),
             n_obj=2,
             n_ieq_constr=1 + len(self.orderliness_limits.as_dict()),
             xl=xl,
@@ -923,7 +928,7 @@ class Direct138LayoutProblem(ElementwiseProblem):
         )
 
     def constraint_components(self, x):
-        positions = to_integer_layout(np.asarray(x))
+        positions = to_integer_layout(np.asarray(x), self.cfg)
         design_key = tuple(value for triple in positions for value in triple)
         limits_key = tuple(self.orderliness_limits.as_dict().items())
         cache_key = (self.cfg, limits_key, design_key)
@@ -984,7 +989,7 @@ class Direct138LayoutProblem(ElementwiseProblem):
             out["orderliness"] = orderliness
             return
 
-        positions = to_integer_layout(np.asarray(x))
+        positions = to_integer_layout(np.asarray(x), self.cfg)
         simulation = evaluate_layout(
             get_context(self.cfg),
             positions,
@@ -1087,7 +1092,7 @@ def _try_place_boundary_chain(
             continue
         thetas = [
             (
-                int(rng.integers(0, 4))
+                0
                 if cfg.booths[booth_id].is_table
                 else int(rng.choice(theta_candidates))
             )
@@ -1189,7 +1194,7 @@ def construct_random_orderly_layout(
     lane_trials: int = 400,
     style: str | None = None,
 ) -> np.ndarray:
-    """内部列・外周追従・混成から物理制約充足138変数を構成する。
+    """内部列・外周追従・混成から物理制約充足設計ベクトルを構成する。
 
     fixed_positionや人手配置は参照しない。会場多角形だけを使って外周配置も
     生成し、染色体は直接表現のまま保持する。最適化後の修復ではない。
@@ -1235,6 +1240,7 @@ def construct_random_orderly_layout(
                     if boundary_result is not None:
                         occupied, front_reserved, boundary_states = boundary_result
                         for booth_id, x_pos, y_pos, theta_value in boundary_states:
+                            theta_value = 0 if cfg.booths[booth_id].is_table else theta_value
                             base = 3 * booth_id
                             layout[base : base + 3] = (
                                 x_pos,
@@ -1250,9 +1256,7 @@ def construct_random_orderly_layout(
                     )
                     thetas = [
                         (
-                            int(rng.integers(0, 4))
-                            if cfg.booths[booth_id].is_table
-                            else active_theta
+                            0 if cfg.booths[booth_id].is_table else active_theta
                         )
                         for booth_id in members
                     ]
@@ -1336,6 +1340,7 @@ def construct_random_orderly_layout(
                         occupied = temporary
                         front_reserved = temporary_front
                         for booth_id, x_pos, y_pos, theta_value in candidate_states:
+                            theta_value = 0 if cfg.booths[booth_id].is_table else theta_value
                             base = 3 * booth_id
                             layout[base : base + 3] = (
                                 x_pos,
@@ -1351,6 +1356,7 @@ def construct_random_orderly_layout(
                 break
         if succeeded and np.all(layout >= 0):
             positions = to_integer_layout(layout)
+            design = positions_to_design(cfg, positions)
             geometry = build_placement_geometry(cfg, positions)
             if (
                 compute_violation(
@@ -1362,13 +1368,13 @@ def construct_random_orderly_layout(
                 <= 0.0
                 and compute_direct_orderliness(
                     cfg,
-                    layout,
+                    design,
                     venue=venue,
                     geometry=geometry,
                 )["total"]
                 <= 1.0
             ):
-                return layout
+                return design
     raise RuntimeError(
         "ランダムな内部列/外周追従配置を構成できません。"
         "initial_max_trialsまたはlane_trialsを増やしてください。"
@@ -1376,7 +1382,7 @@ def construct_random_orderly_layout(
 
 
 class RandomFeasibleDirectSampling(Sampling):
-    """固定配置を使わず、物理/成分別整然さ制約を満たす初期集団を作る。"""
+    """固定配置・列・外周モチーフを使わず、物理的に有効な初期集団を作る。"""
 
     def __init__(
         self,
@@ -1393,31 +1399,32 @@ class RandomFeasibleDirectSampling(Sampling):
 
     def _do(self, problem: Direct138LayoutProblem, n_samples: int, **kwargs):
         rng = np.random.default_rng(self.seed)
+        venue = build_base_venue(self.cfg)
         output = np.empty((int(n_samples), problem.n_var), dtype=np.int64)
         known: set[tuple[int, ...]] = set()
         for row in range(int(n_samples)):
-            initialization_style = str(
-                rng.choice(("lane", "perimeter", "hybrid"), p=(0.50, 0.20, 0.30))
-            )
             for _ in range(self.max_trials_per_individual):
-                candidate = construct_random_orderly_layout(
-                    self.cfg,
-                    rng,
-                    max_restarts=max(10, self.position_trials),
-                    style=initialization_style,
-                )
+                try:
+                    candidate = sample_valid_layout(
+                        rng,
+                        problem.xl,
+                        problem.xu,
+                        self.cfg,
+                        venue,
+                        max_trials=max(1000, self.position_trials),
+                    )
+                except RuntimeError:
+                    continue
                 key = tuple(int(v) for v in candidate)
                 if key in known:
-                    continue
-                if not problem.is_orderly(candidate):
                     continue
                 output[row] = candidate
                 known.add(key)
                 break
             else:
                 raise RuntimeError(
-                    "ランダムな138次元制約充足初期個体を生成できません。"
-                    "成分別上限を緩めるかinitial_max_trialsを増やしてください。"
+                    "重複しない完全ランダム物理制約充足初期個体を生成できません。"
+                    "initial_max_trialsを増やしてください。"
                 )
         return output
 
@@ -1469,16 +1476,18 @@ class DirectAreaCrossover(Crossover):
             for booth_id, booth in enumerate(self.cfg.booths):
                 if str(booth.area) != selected_area:
                     continue
-                sl = slice(3 * booth_id, 3 * booth_id + 3)
+                x_index, _, theta_index = booth_variable_indices(self.cfg, booth_id)
+                sl = slice(x_index, x_index + (2 if theta_index is None else 3))
                 child_first[sl] = second[sl]
                 child_second[sl] = first[sl]
-            # 区画境界付近の待機列などで制約を壊した場合は親へ戻す。
+            # 物理制約を壊した場合だけ親へ戻す。整然さ制約は制約付き選択に委ね、
+            # 完全ランダム初期集団から段階的に改善できるようにする。
             for child, parent in (
                 (child_first, first),
                 (child_second, second),
             ):
-                physical, order_constraints, _ = problem.constraint_components(child)
-                if physical > 0.0 or np.any(order_constraints > 0.0):
+                physical, _, _ = problem.constraint_components(child)
+                if physical > 0.0:
                     child[:] = parent
             offspring[0, mating] = child_first
             offspring[1, mating] = child_second
@@ -1486,7 +1495,7 @@ class DirectAreaCrossover(Crossover):
 
 
 class DirectMultiScaleMutation(Mutation):
-    """138直接変数用の局所・中規模・大域突然変異。"""
+    """可変ブロック直接表現用の局所・中規模・大域突然変異。"""
 
     def __init__(
         self,
@@ -1517,19 +1526,31 @@ class DirectMultiScaleMutation(Mutation):
         physical, order_constraints, _ = problem.constraint_components(x)
         return bool(physical <= 0.0 and np.all(order_constraints <= 0.0))
 
+    def _is_acceptable(self, problem, candidate, current) -> bool:
+        """物理制約を守り、整然さ違反を悪化させない候補だけを受理する。"""
+        physical, constraints, _ = problem.constraint_components(candidate)
+        if physical > 0.0:
+            return False
+        _, current_constraints, _ = problem.constraint_components(current)
+        candidate_cv = float(np.sum(np.maximum(constraints, 0.0)))
+        current_cv = float(np.sum(np.maximum(current_constraints, 0.0)))
+        return candidate_cv <= current_cv + 1.0e-12
+
     def _mutate_local(self, problem, x, rng) -> None:
         count = int(rng.integers(1, min(4, len(self.cfg.booths)) + 1))
         booth_ids = rng.choice(len(self.cfg.booths), size=count, replace=False)
         current = x.copy()
         for booth_raw in booth_ids:
             booth_id = int(booth_raw)
-            base = 3 * booth_id
+            x_index, y_index, theta_index = booth_variable_indices(
+                self.cfg, booth_id
+            )
             accepted = False
             for _ in range(self.max_position_trials):
                 candidate = current.copy()
-                operation = int(rng.integers(0, 3))
+                operation = int(rng.integers(0, 2 if theta_index is None else 3))
                 if operation < 2:
-                    gene = base + operation
+                    gene = x_index if operation == 0 else y_index
                     # 選択済み配置モチーフの許容幅内で局所差を探索する。
                     step = int(rng.choice([-1, 1]))
                     candidate[gene] = int(
@@ -1541,10 +1562,10 @@ class DirectMultiScaleMutation(Mutation):
                     )
                 else:
                     # 行/列に対する正面軸を壊さず、反対側を向かせる。
-                    candidate[base + 2] = (int(candidate[base + 2]) + 2) % 4
+                    candidate[theta_index] = (int(candidate[theta_index]) + 2) % 4
                 if np.array_equal(candidate, current):
                     continue
-                if self._is_feasible(problem, candidate):
+                if self._is_acceptable(problem, candidate, current):
                     current = candidate
                     accepted = True
                     break
@@ -1553,7 +1574,7 @@ class DirectMultiScaleMutation(Mutation):
         x[:] = current
 
     def _aligned_subset(self, x, rng) -> list[int]:
-        positions = np.asarray(x, dtype=np.int64).reshape(-1, 3)
+        positions = np.asarray(to_integer_layout(x, self.cfg), dtype=np.int64)
         available: list[DirectMotif] = []
         for group in self.groups:
             available.extend(
@@ -1573,12 +1594,16 @@ class DirectMultiScaleMutation(Mutation):
                 int(v) for v in rng.choice(group.booth_ids, size=2, replace=False)
             )
             candidate = x.copy()
-            first_slice = slice(3 * first, 3 * first + 3)
-            second_slice = slice(3 * second, 3 * second + 3)
-            first_value = candidate[first_slice].copy()
-            candidate[first_slice] = candidate[second_slice]
-            candidate[second_slice] = first_value
-            if self._is_feasible(problem, candidate):
+            first_x, first_y, first_theta = booth_variable_indices(self.cfg, first)
+            second_x, second_y, second_theta = booth_variable_indices(self.cfg, second)
+            first_xy = candidate[[first_x, first_y]].copy()
+            candidate[[first_x, first_y]] = candidate[[second_x, second_y]]
+            candidate[[second_x, second_y]] = first_xy
+            if first_theta is not None and second_theta is not None:
+                candidate[first_theta], candidate[second_theta] = (
+                    candidate[second_theta], candidate[first_theta]
+                )
+            if self._is_acceptable(problem, candidate, x):
                 x[:] = candidate
                 return True
         return False
@@ -1592,18 +1617,18 @@ class DirectMultiScaleMutation(Mutation):
             if float(rng.random()) < 0.5:
                 dx, dy = -dx, -dy
             for booth_id in members:
-                base = 3 * booth_id
-                candidate[base] = int(
-                    np.clip(candidate[base] + dx, problem.xl[base], problem.xu[base])
+                x_index, y_index, _ = booth_variable_indices(self.cfg, booth_id)
+                candidate[x_index] = int(
+                    np.clip(candidate[x_index] + dx, problem.xl[x_index], problem.xu[x_index])
                 )
-                candidate[base + 1] = int(
+                candidate[y_index] = int(
                     np.clip(
-                        candidate[base + 1] + dy,
-                        problem.xl[base + 1],
-                        problem.xu[base + 1],
+                        candidate[y_index] + dy,
+                        problem.xl[y_index],
+                        problem.xu[y_index],
                     )
                 )
-            if not np.array_equal(candidate, x) and self._is_feasible(problem, candidate):
+            if not np.array_equal(candidate, x) and self._is_acceptable(problem, candidate, x):
                 x[:] = candidate
                 return True
         return False
@@ -1612,30 +1637,35 @@ class DirectMultiScaleMutation(Mutation):
         for _ in range(self.max_position_trials):
             members = self._aligned_subset(x, rng)
             candidate = x.copy()
-            positions = candidate.reshape(-1, 3)
+            positions = np.asarray(to_integer_layout(candidate, self.cfg), dtype=np.int64)
             center_x = float(np.mean(positions[members, 0]))
             center_y = float(np.mean(positions[members, 1]))
             direction = -1 if float(rng.random()) < 0.5 else 1
             for booth_id in members:
-                base = 3 * booth_id
-                rel_x = int(candidate[base]) - center_x
-                rel_y = int(candidate[base + 1]) - center_y
-                candidate[base] = int(
+                x_index, y_index, theta_index = booth_variable_indices(
+                    self.cfg, booth_id
+                )
+                rel_x = int(candidate[x_index]) - center_x
+                rel_y = int(candidate[y_index]) - center_y
+                candidate[x_index] = int(
                     np.clip(
                         round(center_x - direction * rel_y),
-                        problem.xl[base],
-                        problem.xu[base],
+                        problem.xl[x_index],
+                        problem.xu[x_index],
                     )
                 )
-                candidate[base + 1] = int(
+                candidate[y_index] = int(
                     np.clip(
                         round(center_y + direction * rel_x),
-                        problem.xl[base + 1],
-                        problem.xu[base + 1],
+                        problem.xl[y_index],
+                        problem.xu[y_index],
                     )
                 )
-                candidate[base + 2] = (int(candidate[base + 2]) + direction) % 4
-            if self._is_feasible(problem, candidate):
+                if theta_index is not None:
+                    candidate[theta_index] = (
+                        int(candidate[theta_index]) + direction
+                    ) % 4
+            if self._is_acceptable(problem, candidate, x):
                 x[:] = candidate
                 return True
         return False
@@ -1688,9 +1718,10 @@ class DirectMultiScaleMutation(Mutation):
         candidate = x.copy()
         for booth_id, booth in enumerate(self.cfg.booths):
             if str(booth.area) == area:
-                sl = slice(3 * booth_id, 3 * booth_id + 3)
+                x_index, _, theta_index = booth_variable_indices(self.cfg, booth_id)
+                sl = slice(x_index, x_index + (2 if theta_index is None else 3))
                 candidate[sl] = donor[sl]
-        x[:] = candidate if self._is_feasible(problem, candidate) else donor
+        x[:] = candidate if self._is_acceptable(problem, candidate, x) else donor
         return True
 
     def _macro_transform(self, problem, x, rng, mirror: bool) -> bool:
@@ -1702,31 +1733,35 @@ class DirectMultiScaleMutation(Mutation):
                 if str(booth.area) == area
             ]
             candidate = x.copy()
-            positions = candidate.reshape(-1, 3)
+            positions = np.asarray(to_integer_layout(candidate, self.cfg), dtype=np.int64)
             if mirror:
                 axis_x = float(np.mean(positions[members, 0]))
                 horizontal = float(rng.random()) < 0.5
                 axis_y = float(np.mean(positions[members, 1]))
                 for booth_id in members:
-                    base = 3 * booth_id
+                    x_index, y_index, theta_index = booth_variable_indices(
+                        self.cfg, booth_id
+                    )
                     if horizontal:
-                        candidate[base] = int(
+                        candidate[x_index] = int(
                             np.clip(
-                                round(2 * axis_x - candidate[base]),
-                                problem.xl[base],
-                                problem.xu[base],
+                                round(2 * axis_x - candidate[x_index]),
+                                problem.xl[x_index],
+                                problem.xu[x_index],
                             )
                         )
-                        candidate[base + 2] = (-int(candidate[base + 2])) % 4
+                        if theta_index is not None:
+                            candidate[theta_index] = (-int(candidate[theta_index])) % 4
                     else:
-                        candidate[base + 1] = int(
+                        candidate[y_index] = int(
                             np.clip(
-                                round(2 * axis_y - candidate[base + 1]),
-                                problem.xl[base + 1],
-                                problem.xu[base + 1],
+                                round(2 * axis_y - candidate[y_index]),
+                                problem.xl[y_index],
+                                problem.xu[y_index],
                             )
                         )
-                        candidate[base + 2] = (2 - int(candidate[base + 2])) % 4
+                        if theta_index is not None:
+                            candidate[theta_index] = (2 - int(candidate[theta_index])) % 4
             else:
                 distance = int(rng.integers(4, 11))
                 dx, dy = (
@@ -1735,18 +1770,18 @@ class DirectMultiScaleMutation(Mutation):
                 if float(rng.random()) < 0.5:
                     dx, dy = -dx, -dy
                 for booth_id in members:
-                    base = 3 * booth_id
-                    candidate[base] = int(
-                        np.clip(candidate[base] + dx, problem.xl[base], problem.xu[base])
+                    x_index, y_index, _ = booth_variable_indices(self.cfg, booth_id)
+                    candidate[x_index] = int(
+                        np.clip(candidate[x_index] + dx, problem.xl[x_index], problem.xu[x_index])
                     )
-                    candidate[base + 1] = int(
+                    candidate[y_index] = int(
                         np.clip(
-                            candidate[base + 1] + dy,
-                            problem.xl[base + 1],
-                            problem.xu[base + 1],
+                            candidate[y_index] + dy,
+                            problem.xl[y_index],
+                            problem.xu[y_index],
                         )
                     )
-            if not np.array_equal(candidate, x) and self._is_feasible(problem, candidate):
+            if not np.array_equal(candidate, x) and self._is_acceptable(problem, candidate, x):
                 x[:] = candidate
                 return True
         return False
@@ -1782,7 +1817,7 @@ class DirectMultiScaleMutation(Mutation):
             else:
                 self._mutate_macro(problem, output[row], rng)
             # 各スケールの操作は、実行可能性を確認した候補だけを反映する。
-            # ここで同じ138変数を再判定する必要はない。
+            # ここで同じ設計変数を再判定する必要はない。
         return output
 
 
@@ -2050,7 +2085,7 @@ def run_direct_nsga2(
     memetic_max_neighbor_trials: int = 1000,
     on_generation=None,
 ):
-    """138次元直接表現のNSGA-IIを実行する。"""
+    """通常ブース3変数・テーブル2変数の直接表現NSGA-IIを実行する。"""
 
     kwargs = {}
     if elementwise_runner is not None:
@@ -2108,7 +2143,7 @@ def run_direct_nsga2(
     )
     result.objective_history = callback.records
     if result.X is None:
-        raise RuntimeError("138次元GAから実行可能なパレート解を取得できませんでした")
+        raise RuntimeError("直接表現GAから実行可能なパレート解を取得できませんでした")
 
     designs = np.atleast_2d(np.asarray(result.X, dtype=np.int64))
     components = [
@@ -2152,7 +2187,7 @@ def prepare_random_feasible_direct_population(
     initial_max_trials: int = 5000,
     starmap=None,
 ) -> np.ndarray:
-    """決定的な個体別乱数系列で、制約充足初期集団を生成する。
+    """決定的な個体別乱数系列で、物理制約充足初期集団を生成する。
 
     ``starmap`` の有無にかかわらず各個体のseedは同じなので、ワーカー数を
     変更しても同じ初期集団を返す。重複時だけその個体のretry番号を進める。
@@ -2168,17 +2203,7 @@ def prepare_random_feasible_direct_population(
     output = np.empty((n_samples, problem.n_var), dtype=np.int64)
     retry_counts = np.zeros(n_samples, dtype=np.int64)
     pending = list(range(n_samples))
-    known: set[tuple[int, ...]] = {
-        tuple(
-            int(value)
-            for booth in cfg.booths
-            for value in (
-                booth.fixed_position
-                if booth.fixed_position is not None
-                else (0, 0, 0)
-            )
-        )
-    }
+    known: set[tuple[int, ...]] = set()
     while pending:
         tasks = [
             (
@@ -2214,7 +2239,7 @@ def prepare_random_feasible_direct_population(
 
 
 def save_direct_metadata(result, out_dir: str | Path) -> None:
-    """138次元設計値、整然さ内訳、最適化方式を保存する。"""
+    """直接設計値、整然さ内訳、最適化方式を保存する。"""
 
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -2229,17 +2254,17 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
             row[f"order_{key}"] = float(components[key])
         rows.append(row)
     pd.DataFrame(rows).to_csv(
-        output / "direct_138_designs.csv", index=False, encoding="utf-8-sig"
+        output / f"direct_{designs.shape[1]}_designs.csv", index=False, encoding="utf-8-sig"
     )
     pd.DataFrame(result.memetic_history).to_csv(
         output / "memetic_history.csv", index=False, encoding="utf-8-sig"
     )
     payload = {
-        "method": "single_level_direct_138_layout_nsga2",
+        "method": f"single_level_direct_{designs.shape[1]}_layout_nsga2",
         "n_genes": int(designs.shape[1]),
-        "encoding": "46 booths x (x, y, theta)",
+        "encoding": "active booth=(x,y,theta), table=(x,y)",
         "orderliness_limits": result.orderliness_limits.as_dict(),
-        "initialization": "random_lane_perimeter_hybrid_physical_and_acceptability_feasible",
+        "initialization": "uniform_random_xy_and_active_booth_orientation_physical_feasible_only",
         "uses_fixed_position_for_initialization": False,
         "post_optimization_repair": False,
         "objectives": {
@@ -2274,6 +2299,6 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
             "evaluation_budget_changed": False,
         },
     }
-    (output / "direct_138_method.json").write_text(
+    (output / f"direct_{designs.shape[1]}_method.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
