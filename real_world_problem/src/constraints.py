@@ -21,6 +21,7 @@ from .venue import (
     booth_exit_cell,
     queue_cells_of,
     reception_cell,
+    table_access_cells_of,
     VALID_THETAS,
 )
 
@@ -36,6 +37,7 @@ class PlacementGeometry:
     receptions: tuple[tuple[int, int] | None, ...]
     booth_exits: tuple[tuple[int, int] | None, ...]
     queue_cells: tuple[tuple[tuple[int, int], ...], ...]
+    table_access_cells: tuple[tuple[tuple[int, int], ...], ...]
     claimed_cells: tuple[frozenset[tuple[int, int]], ...]
 
 
@@ -65,6 +67,10 @@ def build_placement_geometry(
         tuple(queue_cells_of(cfg, booth_id, *normalized[booth_id]))
         for booth_id in range(len(cfg.booths))
     )
+    table_access_cells = tuple(
+        tuple(table_access_cells_of(cfg, booth_id, *normalized[booth_id]))
+        for booth_id in range(len(cfg.booths))
+    )
     claimed_cells = []
     for booth_id in range(len(cfg.booths)):
         claimed = set(booth_cells[booth_id])
@@ -73,6 +79,7 @@ def build_placement_geometry(
         if booth_exits[booth_id] is not None:
             claimed.add(booth_exits[booth_id])
         claimed.update(queue_cells[booth_id])
+        claimed.update(table_access_cells[booth_id])
         claimed_cells.append(frozenset(claimed))
     return PlacementGeometry(
         positions=normalized,
@@ -80,19 +87,54 @@ def build_placement_geometry(
         receptions=receptions,
         booth_exits=booth_exits,
         queue_cells=queue_cells,
+        table_access_cells=table_access_cells,
         claimed_cells=tuple(claimed_cells),
     )
 
 
-def to_integer_layout(x: np.ndarray) -> tuple[tuple[int, int, int], ...]:
+def design_variable_count(cfg: Config) -> int:
+    """通常ブース3変数、テーブル2変数として総設計変数数を返す。"""
+    return sum(2 if booth.is_table else 3 for booth in cfg.booths)
+
+
+def booth_variable_indices(
+    cfg: Config, booth_id: int
+) -> tuple[int, int, int | None]:
+    """指定配置物の x, y, theta の遺伝子位置を返す。テーブルのthetaはNone。"""
+    offset = sum(2 if booth.is_table else 3 for booth in cfg.booths[:booth_id])
+    return offset, offset + 1, None if cfg.booths[booth_id].is_table else offset + 2
+
+
+def positions_to_design(cfg: Config, positions) -> np.ndarray:
+    """内部 ``(x,y,theta)`` 配置を、テーブルthetaなしの設計ベクトルへ変換する。"""
+    if len(positions) != len(cfg.booths):
+        raise ValueError("positions length does not match cfg.booths")
+    values: list[int] = []
+    for booth, position in zip(cfg.booths, positions):
+        x_pos, y_pos, theta = (int(value) for value in position)
+        values.extend((x_pos, y_pos))
+        if not booth.is_table:
+            values.append(theta)
+    return np.asarray(values, dtype=np.int64)
+
+
+def to_integer_layout(
+    x: np.ndarray, cfg: Config | None = None
+) -> tuple[tuple[int, int, int], ...]:
     """整数設計ベクトルを ``((x1, y1, theta1), ...)`` に変換する。
 
-    theta は ``0=北, 1=東, 2=南, 3=西`` とする。
+    cfg指定時、テーブルは ``(x,y)`` の2変数だけを読み、内部thetaを0に固定する。
+    通常ブースのthetaは ``0=北, 1=東, 2=南, 3=西`` とする。
     小数は暗黙に丸めず、含まれていれば ValueError を発生させる。
     """
     values = np.asarray(x)
 
-    if values.size % 3 != 0:
+    expected = design_variable_count(cfg) if cfg is not None else None
+    if expected is not None and values.size != expected:
+        raise ValueError(
+            f"design vector length mismatch: expected {expected}, got {values.size}"
+        )
+    if cfg is None and values.size % 3 != 0:
         raise ValueError(
             "design vector length must be a multiple of 3: "
             f"{values.size}"
@@ -116,14 +158,25 @@ def to_integer_layout(x: np.ndarray) -> tuple[tuple[int, int, int], ...]:
             f"fractional values were found: {values}"
         )
 
-    triples = rounded.astype(
-        np.int64,
-        copy=False,
-    ).reshape(-1, 3)
+    integers = rounded.astype(np.int64, copy=False).reshape(-1)
+    if cfg is not None:
+        triples = []
+        cursor = 0
+        for booth in cfg.booths:
+            x_pos, y_pos = int(integers[cursor]), int(integers[cursor + 1])
+            cursor += 2
+            theta = 0 if booth.is_table else int(integers[cursor])
+            cursor += 0 if booth.is_table else 1
+            triples.append((x_pos, y_pos, theta))
+    else:
+        triples = [tuple(int(value) for value in row) for row in integers.reshape(-1, 3)]
 
     invalid_theta = [
         int(theta)
-        for theta in triples[:, 2]
+        for booth, (_, _, theta) in zip(
+            cfg.booths if cfg is not None else (None,) * len(triples), triples
+        )
+        if booth is None or not booth.is_table
         if int(theta) not in VALID_THETAS
     ]
 
@@ -164,6 +217,7 @@ def compute_violation(
     receptions = geom.receptions
     booth_exits = geom.booth_exits
     qcells = geom.queue_cells
+    table_access_cells = geom.table_access_cells
 
     # 使用セル集合(受付+行列): 相互重複チェック用
     claim_count = np.zeros((H, W), dtype=np.int16)  # 場内セルの多重使用数
@@ -182,7 +236,7 @@ def compute_violation(
     for b in range(n_booths):
         # 20260629 方式では受付が待機列先頭と同じセル。ブース内の重複は
         # 合法なので、ブースごとに一意化してから他ブースとの競合を数える。
-        # テーブルは受付・退出・行列を持たない(None / 空)。
+        # テーブルは専用出入口を持たず、周囲4辺のアクセスセルを確保する。
         g += claim(geom.claimed_cells[b])
 
     # --- 項目 1: 重なり(ブース同士・受付・行列の相互重複)
@@ -203,6 +257,11 @@ def compute_violation(
         # 行列セル: EMPTY または FORBIDDEN(通行可)を許可(§5.2)
         for (x, y) in qcells[b]:
             if _in_bounds(cfg, x, y) and base[y, x] not in (EMPTY, FORBIDDEN):
+                g += 1
+        # テーブルは周囲4辺の全隣接セルから利用できる。専用出入口ではないため
+        # セル種別は変えず、通行可能であることだけを要求する。
+        for (x, y) in table_access_cells[b]:
+            if _in_bounds(cfg, x, y) and base[y, x] not in WALKABLE_TYPES:
                 g += 1
         # 体験後退出セル: EMPTY のみ許可。受付共用時の重複検査は上で一意化済み。
         if booth_exits[b] is not None:
@@ -234,13 +293,19 @@ def compute_violation(
     if all(ent_field[y, x] >= INF_DIST for (x, y) in venue.exit_cells):
         g += REACHABILITY_PENALTY
 
-    # 項目 7: 入口→各ブース受付の到達性(テーブルは受付なし)
+    # 項目 7: 入口→各ブース受付の到達性
     for b in range(n_booths):
         if receptions[b] is None:
             continue
         rx, ry = receptions[b]
         if ent_field[ry, rx] >= INF_DIST:
             g += REACHABILITY_PENALTY
+        
+    # テーブル周囲4辺の全アクセスセルへ到達できることを要求する。
+    for b in range(n_booths):
+        for tx, ty in table_access_cells[b]:
+            if ent_field[ty, tx] >= INF_DIST:
+                g += REACHABILITY_PENALTY
 
     # ブース退出セル→会場出口の到達性
     exit_field = bfs_distance_field(walkable, venue.exit_cells)
@@ -282,5 +347,5 @@ def compute_violation_vector(
     return compute_violation(
         cfg,
         venue,
-        to_integer_layout(x),
+        to_integer_layout(x, cfg),
     )

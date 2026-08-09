@@ -2,7 +2,7 @@
 
 静的コンテキスト(会場・来場者テーブル・距離場以外の共有物)はワーカー
 プロセスごとに 1 回だけ構築してモジュールグローバルへキャッシュする(§16.3)。
-各タスクには 12 次元の配置ベクトル(または整数配置)だけを渡す。
+各タスクには直接配置ベクトル(または整数配置)だけを渡す。
 乱数は §2.3.2 の 3 系統方式のため、並列・直列で結果が完全に一致する(§16.5)。
 """
 from __future__ import annotations
@@ -121,7 +121,7 @@ def evaluate_vector(
     ctx = get_context(cfg)
 
     # 小数を暗黙に丸めず、整数であることを検証する。
-    positions = to_integer_layout(x)
+    positions = to_integer_layout(x, cfg)
 
     g = compute_violation(
         cfg,

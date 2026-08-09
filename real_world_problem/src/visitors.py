@@ -26,6 +26,7 @@ class VisitorRecord:
     max_visit_seconds: float
     distance_weight_factor: float
     interests: tuple  # カテゴリ別興味 [0,1]
+    table_after_food_propensity: float = 1.0  # 配置に依存しない着席選好 U(0,1)
 
 
 def generate_visitor_table(cfg: Config) -> tuple:
@@ -85,6 +86,7 @@ def generate_visitor_table(cfg: Config) -> tuple:
                 max_visit_seconds=prof.max_visit_seconds,
                 distance_weight_factor=prof.distance_weight_factor,
                 interests=tuple(float(v) for v in interests),
+                table_after_food_propensity=float(rng.random()),
             )
         )
     return tuple(records)
@@ -104,6 +106,7 @@ def instantiate_visitors(records: tuple) -> list:
             interests=np.array(r.interests, dtype=float),
             distance_weight_factor=r.distance_weight_factor,
             profile_name=r.profile_name,
+            table_after_food_propensity=getattr(r, "table_after_food_propensity", 1.0),
             state=NOT_ARRIVED,
         )
         for r in records

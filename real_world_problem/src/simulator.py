@@ -25,6 +25,7 @@ from .models import (
     FINISHED,
     NOT_ARRIVED,
     QUEUING,
+    RESTING,
     WALKING,
     EXIT,
     INF_DIST,
@@ -97,13 +98,17 @@ class Simulation:
         ] = {}
 
         # §9.4 静的距離場(配置ごとに 1 回、体験ブース数+1 回の BFS)。
-        # テーブル(受付なし)は目的地にならないため None。
-        self.booth_fields = [
-            None
-            if layout.receptions[b] is None
-            else bfs_distance_field(self.walkable, [layout.receptions[b]])
-            for b in range(len(cfg.booths))
-        ]
+        # 体験ブースは受付、テーブルは周囲4辺への静的距離場を持つ。
+        self.booth_fields = []
+        for b, spec in enumerate(cfg.booths):
+            sources = (
+                layout.table_access_cells[b]
+                if spec.is_table
+                else ((layout.receptions[b],) if layout.receptions[b] is not None else ())
+            )
+            self.booth_fields.append(
+                bfs_distance_field(self.walkable, sources) if sources else None
+            )
         self.exit_field = bfs_distance_field(self.walkable, venue.exit_cells)
         self.exit_set = set(venue.exit_cells)
 
@@ -113,6 +118,7 @@ class Simulation:
         self.service_steps = [
             max(1, round(b.mean_service_seconds / cfg.dt_seconds)) for b in cfg.booths
         ]
+        self.table_rest_steps = max(1, round(cfg.table_rest_seconds / cfg.dt_seconds))
 
         # 乱数(§2.3.2): 系統2 は来場者ごとに遅延生成、系統3 はタイブレーク専用
         self._decision_rngs: dict[int, np.random.Generator] = {}
@@ -137,6 +143,7 @@ class Simulation:
         self.congestion_history: list[float] = [] # 時系列グラフ用
         self.movement_history: list[float] = [] # 時系列グラフ用
         self.experiences_completed = 0
+        self.executed_steps = 0
 
     def _visitor(self, vid: int):
         """visitor_id からエージェントを引く(テスト等で id が連番でなくても安全)。"""
@@ -266,7 +273,9 @@ class Simulation:
             self._queue_step(t)
             self._decision_step(t)
             self._movement_step(t)
+            self._fatigue_step()
             self._metrics_step(t)
+            self.executed_steps = t + 1
 
             if self.record_frames and t % self.frame_interval == 0:
                 self._capture_frame(t)
@@ -322,6 +331,7 @@ class Simulation:
         for rt in self.booths:
             spec = self.cfg.booths[rt.booth_id]
             if spec.is_table:
+                self._table_step(rt, t)
                 continue
             ex, ey = self.layout.booth_exits[rt.booth_id]
             separate_exit = self.layout.booth_exits[rt.booth_id] != self.layout.receptions[rt.booth_id]
@@ -339,6 +349,14 @@ class Simulation:
                 self.occupancy[ey, ex] += 1
                 v.position = (ex, ey)
                 v.visited_booths.add(rt.booth_id)
+                if spec.category in self.cfg.table_after_categories:
+                    wants_table = (
+                        v.table_after_food_propensity
+                        < self.cfg.table_after_food_probability
+                    )
+                    v.table_requested_after_food = wants_table
+                    if wants_table:
+                        v.table_requests_after_food += 1
                 v.state = CHOOSING  # max_visit 超過時は意思決定で EXITING へ(§6.2)
 
             # 退出待ちがいない場合のみキュー先頭を入場(§11.4)
@@ -355,6 +373,35 @@ class Simulation:
                 v.state = EXPERIENCING
                 rt.active_users[vid] = t + self.service_steps[rt.booth_id]
                 self._shift_queue(rt)
+
+    def _table_step(self, rt: BoothRuntime, t: int) -> None:
+        """休憩完了者を周囲4辺の空きセルへ戻す。待機列は作らない。"""
+        accesses = self.layout.table_access_cells[rt.booth_id]
+        done = [vid for vid, end in rt.active_users.items() if end <= t]
+        for vid in done:
+            del rt.active_users[vid]
+            rt.exit_waiting.append(vid)
+        while rt.exit_waiting:
+            available = [
+                (x, y)
+                for x, y in accesses
+                if self.occupancy[y, x] < self.capacity[y, x]
+            ]
+            if not available:
+                break
+            min_occupancy = min(self.occupancy[y, x] for x, y in available)
+            best = [
+                cell for cell in available
+                if self.occupancy[cell[1], cell[0]] == min_occupancy
+            ]
+            access = best[int(self._tiebreak.integers(len(best)))]
+            ax, ay = access
+            vid = rt.exit_waiting.popleft()
+            v = self._visitor(vid)
+            self.occupancy[ay, ax] += 1
+            v.position = access
+            v.target_booth_id = None
+            v.state = CHOOSING
 
     def _shift_queue(self, rt: BoothRuntime) -> None:
         """待機者を先頭(受付側)から詰め直す(§5.2)。"""
@@ -406,6 +453,11 @@ class Simulation:
     def _choose_target(self, v: Visitor, t: int) -> None:
         """効用 + softmax によるブース選択(§8)。候補なしなら EXITING。"""
         cfg = self.cfg
+        if (
+            v.table_requested_after_food
+            or v.fatigue >= cfg.fatigue_rest_threshold
+        ) and self._choose_table(v, t):
+            return
         x, y = v.position
         cand_ids: list[int] = []
         utils: list[float] = []
@@ -454,6 +506,59 @@ class Simulation:
         v.steps_since_plan = 0
         v.blocked_count = 0
         v.state = WALKING
+
+    def _choose_table(self, v: Visitor, t: int) -> bool:
+        """空席があり到達可能なテーブルを、距離と満席度から選択する。"""
+        cfg = self.cfg
+        x, y = v.position
+        candidates: list[int] = []
+        utilities: list[float] = []
+        for b, spec in enumerate(cfg.booths):
+            if not spec.is_table:
+                continue
+            field = self.booth_fields[b]
+            if field is None or field[y, x] >= INF_DIST:
+                continue
+            occupied = len(self.booths[b].active_users)
+            if occupied >= spec.capacity:
+                continue
+            distance = float(field[y, x]) / cfg.d_max
+            occupancy_ratio = occupied / spec.capacity
+            candidates.append(b)
+            utilities.append(-distance - cfg.table_occupancy_weight * occupancy_ratio)
+        if not candidates:
+            return False
+
+        values = np.asarray(utilities, dtype=float)
+        z = (values - values.max()) / cfg.softmax_temperature
+        probabilities = np.exp(z)
+        probabilities /= probabilities.sum()
+        target = softmax_choice(
+            self._rng_of(v.visitor_id), candidates, probabilities
+        )
+        v.target_booth_id = target
+        goal_set = set(self.layout.table_access_cells[target])
+        if v.position in goal_set:
+            v.path, v.path_index = [], 0
+            v.state = WALKING
+            self._arrive_at_reception(v, t)
+            return True
+        path = astar(
+            self.walkable,
+            self.occupancy,
+            self.capacity,
+            v.position,
+            goal_set,
+            v.congestion_avoidance,
+            self.booth_fields[target],
+        )
+        if path is None:
+            return False
+        v.path, v.path_index = path, 0
+        v.steps_since_plan = 0
+        v.blocked_count = 0
+        v.state = WALKING
+        return True
 
     def _utility(self, v: Visitor, b: int, static_dist: int) -> float:
         """§8 の正規化済み効用。"""
@@ -520,12 +625,29 @@ class Simulation:
         v.state = FINISHED
 
     # ------------------------------------------------------------ 5. 移動(§3.4/§10)
+    def _cell_travel_cost(self, cell: tuple) -> float:
+        """混雑率に応じた1セル分の所要時間倍率を返す。
+
+        占有率 r=n/C に対して 1 + w*r^2 とする。通常セルは1セル分、
+        混雑セルは1セルより大きい移動残高が必要になるため、実効速度が落ちる。
+        満員セルへの進入可否は従来どおり容量競合処理で別途判定する。
+        """
+        x, y = cell
+        capacity = max(float(self.capacity[y, x]), 1.0)
+        occupancy_ratio = min(
+            1.0,
+            max(0.0, float(self.occupancy[y, x]) / capacity),
+        )
+        return 1.0 + self.cfg.congestion_travel_time_weight * occupancy_ratio**2
+
     def _movement_step(self, t: int) -> None:
         cfg = self.cfg
         movers = [v for v in self.visitors if v.state in (WALKING, EXITING) and v.position]
 
-        # 移動距離残高の加算(§3.4)。累積上限は 1 ステップの最大移動量。
-        credit_cap = float(cfg.n_substeps)
+        # 移動時間残高の加算(§3.4)。混雑セルでは1セルの移動に1より大きい
+        # 残高が必要になる。最も遅いセルを通過できる値までは蓄積を許す。
+        max_cell_cost = 1.0 + cfg.congestion_travel_time_weight
+        credit_cap = max(float(cfg.n_substeps), max_cell_cost)
         for v in movers:
             gain = v.speed_mps * cfg.dt_seconds / cfg.cell_size_meters
             v.move_credit = min(v.move_credit + gain, credit_cap)
@@ -545,15 +667,18 @@ class Simulation:
         for _sub in range(cfg.n_substeps):
             # 1) 移動希望の一括収集
             proposals: dict[tuple, list[Visitor]] = {}
+            proposal_costs: dict[int, float] = {}
             for v in movers:
                 if (
                     v.state in (WALKING, EXITING)
                     and v.position is not None
-                    and v.move_credit >= 1.0
                     and v.path_index < len(v.path)
                 ):
                     nxt = v.path[v.path_index]
-                    proposals.setdefault(nxt, []).append(v)
+                    travel_cost = self._cell_travel_cost(nxt)
+                    if v.move_credit >= travel_cost:
+                        proposals.setdefault(nxt, []).append(v)
+                        proposal_costs[v.visitor_id] = travel_cost
             if not proposals:
                 continue
 
@@ -592,7 +717,7 @@ class Simulation:
                 self.occupancy[ny, nx] += 1
                 v.position = (nx, ny)
                 v.path_index += 1
-                v.move_credit -= 1.0
+                v.move_credit -= proposal_costs[v.visitor_id]
                 v.moved_cells += 1
                 v.blocked_count = 0
                 if v.path_index >= len(v.path):
@@ -611,7 +736,11 @@ class Simulation:
             goal_set, hfield = self.exit_set, self.exit_field
         else:
             b = v.target_booth_id
-            goal_set, hfield = {self.layout.receptions[b]}, self.booth_fields[b]
+            if self.cfg.booths[b].is_table:
+                goal_set = set(self.layout.table_access_cells[b])
+            else:
+                goal_set = {self.layout.receptions[b]}
+            hfield = self.booth_fields[b]
         if v.position in goal_set:
             v.path, v.path_index = [], 0
             self._handle_arrival(v, self.t)
@@ -636,7 +765,12 @@ class Simulation:
                 self._finish(v)
             return
         if v.state == WALKING and v.target_booth_id is not None:
-            if v.position == self.layout.receptions[v.target_booth_id]:
+            target = v.target_booth_id
+            if self.cfg.booths[target].is_table:
+                arrived = v.position in set(self.layout.table_access_cells[target])
+            else:
+                arrived = v.position == self.layout.receptions[target]
+            if arrived:
                 self._arrive_at_reception(v, t)
 
     # ------------------------------------------------------------ 入場・行列参加(§11.1, §11.3)
@@ -645,6 +779,9 @@ class Simulation:
         b = v.target_booth_id
         spec = cfg.booths[b]
         rt = self.booths[b]
+        if spec.is_table:
+            self._arrive_at_table(v, t, b)
+            return
         rx, ry = self.layout.receptions[b]
         separate_exit = self.layout.booth_exits[b] != self.layout.receptions[b]
 
@@ -678,6 +815,45 @@ class Simulation:
         v.state = QUEUING
         v.current_queue_wait = 0.0
         rt.queue.append(v.visitor_id)
+
+    def _arrive_at_table(self, v: Visitor, t: int, table_id: int) -> None:
+        """空席なら着席させる。到着時に満席なら次ステップに再選択する。"""
+        spec = self.cfg.booths[table_id]
+        rt = self.booths[table_id]
+        if len(rt.active_users) >= spec.capacity:
+            v.target_booth_id = None
+            v.state = CHOOSING
+            return
+        access_x, access_y = v.position
+        self.occupancy[access_y, access_x] -= 1
+        v.position = None
+        v.state = RESTING
+        rt.active_users[v.visitor_id] = t + self.table_rest_steps
+        v.table_visit_count += 1
+        if v.table_requested_after_food:
+            v.food_table_visit_count += 1
+        v.table_requested_after_food = False
+
+    def _fatigue_step(self) -> None:
+        """状態に応じて疲労度を更新し、0～1に制限する。"""
+        cfg = self.cfg
+        dt = cfg.dt_seconds
+        for v in self.visitors:
+            if v.state in (NOT_ARRIVED, FINISHED):
+                continue
+            if v.state in (WALKING, EXITING):
+                delta = cfg.fatigue_walk_per_second * dt
+            elif v.state in (QUEUING, CHOOSING):
+                delta = cfg.fatigue_wait_per_second * dt
+            elif v.state == EXPERIENCING:
+                delta = cfg.fatigue_experience_per_second * dt
+            elif v.state == RESTING:
+                delta = -cfg.fatigue_recovery_per_second * dt
+                v.table_seconds += dt
+            else:
+                delta = 0.0
+            v.fatigue = float(np.clip(v.fatigue + delta, 0.0, 1.0))
+            v.peak_fatigue = max(v.peak_fatigue, v.fatigue)
 
     # ------------------------------------------------------------ 6. 集計(§12.2)
     def _metrics_step(self, t: int) -> None:

@@ -1,9 +1,10 @@
-"""138次元直接表現の1層型NSGA-IIを実行する。
+"""通常ブース3変数・テーブル2変数の直接表現NSGA-IIを実行する。
 
 例:
     python scripts/run_optimization.py --pop 100 --gen 100 --workers 8
 
-初期集団は、物理制約と整然さ制約を満たすランダム個体だけで生成する。
+初期集団は、座標・向きを完全ランダムに決めた物理制約充足個体で生成する。
+列・外周モチーフや ``booths.yaml`` の固定配置は初期化に使用しない。
 ``booths.yaml`` の固定配置は、最適化後の比較にだけ使用する。
 """
 from __future__ import annotations
@@ -32,16 +33,14 @@ try:
 except ImportError:
     from pymoo.core.problem import StarmapParallelization
 
-from src.constraints import compute_violation
+from src.constraints import compute_violation, design_variable_count, to_integer_layout
 from src.models import load_config
 from src.optimization import calculate_hv_history, save_results, select_representatives
 from src.parallel import build_context, default_workers, evaluate_layout, init_worker
 from src.routing import warmup_routing_kernels
 from src.direct_optimization import (
-    Direct138LayoutProblem,
     ORDERLINESS_COMPONENT_KEYS,
     OrderlinessLimits,
-    RandomFeasibleDirectSampling,
     compute_direct_orderliness,
     prepare_random_feasible_direct_population,
     run_direct_nsga2,
@@ -55,26 +54,6 @@ from src.visualization import (
     plot_pareto_front,
     plot_time_series_comparison,
 )
-
-
-def _random_initial_layout(cfg, seed: int, limits, max_orderliness, max_trials: int):
-    """最適化初期化と同じ規則で、第1ランダム制約充足個体を再現する。"""
-    problem = Direct138LayoutProblem(
-        cfg,
-        orderliness_limits=limits,
-        max_orderliness=max_orderliness,
-    )
-    design = prepare_random_feasible_direct_population(
-        cfg,
-        pop_size=1,
-        seed=seed,
-        orderliness_limits=problem.orderliness_limits,
-        initial_max_trials=max_trials,
-    )
-    design = design[0]
-    return design, compute_direct_orderliness(
-        cfg, design, limits=problem.orderliness_limits
-    )
 
 
 def main() -> None:
@@ -236,11 +215,12 @@ def main() -> None:
     )
 
     cfg = load_config(args.config)
+    n_variables = design_variable_count(cfg)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     workers = args.workers if args.workers is not None else default_workers()
     print(
-        f"138次元・1層型GA設定: pop={args.pop or cfg.population_size}, "
+        f"{n_variables}次元・1層型GA設定: pop={args.pop or cfg.population_size}, "
         f"gen={args.gen or cfg.n_generations}, workers={workers}, "
         f"orderliness_limits={orderliness_limits.as_dict()}, "
         "mutation="
@@ -295,7 +275,7 @@ def main() -> None:
                 starmap=pool_starmap,
             )
             print(
-                "ランダム制約充足初期集団の準備: "
+                "完全ランダム物理制約充足初期集団の準備: "
                 f"{time.perf_counter() - preparation_started:.1f}s"
             )
             result = execute(
@@ -312,7 +292,7 @@ def main() -> None:
             initial_max_trials=args.initial_max_trials,
         )
         print(
-            "ランダム制約充足初期集団の準備: "
+            "完全ランダム物理制約充足初期集団の準備: "
             f"{time.perf_counter() - preparation_started:.1f}s"
         )
         result = execute()
@@ -320,7 +300,7 @@ def main() -> None:
 
     F = np.atleast_2d(np.asarray(result.F, dtype=float))
     print(
-        f"\n138次元・直接表現NSGA-II完了: {elapsed:.1f}s / "
+        f"\n{n_variables}次元・直接表現NSGA-II完了: {elapsed:.1f}s / "
         f"パレート解 {len(F)} 件"
     )
 
@@ -344,18 +324,13 @@ def main() -> None:
     hv_history.to_csv(out / "hv_history.csv", index=False, encoding="utf-8-sig")
     plot_hypervolume_history(hv_history, out / "hypervolume_over_generations.png")
 
-    # 最適化で使用した初期化規則と同じ、第1ランダム制約充足個体。
-    initial_design, initial_orderliness = _random_initial_layout(
-        cfg,
-        seed=args.seed,
-        limits=orderliness_limits,
-        max_orderliness=args.max_orderliness,
-        max_trials=args.initial_max_trials,
+    # 実際に最適化へ投入した完全ランダム初期集団の第1個体。
+    initial_design = np.asarray(initial_designs[0], dtype=np.int64).copy()
+    initial_orderliness = compute_direct_orderliness(
+        cfg, initial_design, limits=result.orderliness_limits
     )
     ctx = build_context(cfg)
-    initial_positions = tuple(
-        tuple(int(v) for v in p) for p in initial_design.reshape(-1, 3)
-    )
+    initial_positions = to_integer_layout(initial_design, cfg)
     initial_result = evaluate_layout(ctx, initial_positions)
     initial_f = np.asarray(
         [initial_result.f_move, initial_result.f_congestion], dtype=float
@@ -363,7 +338,7 @@ def main() -> None:
     (out / "random_initial_layout.json").write_text(
         json.dumps(
             {
-                "design_vector_138": [int(v) for v in initial_design],
+                f"design_vector_{n_variables}": [int(v) for v in initial_design],
                 "positions": [list(map(int, p)) for p in initial_positions],
                 "orderliness": initial_orderliness,
                 "f_move": float(initial_f[0]),
