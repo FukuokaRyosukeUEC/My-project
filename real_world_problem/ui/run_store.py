@@ -300,6 +300,22 @@ def read_snapshot(rd: Path, generation: int) -> dict | None:
     return _read_json(snapshot_path(rd, generation))
 
 
+# ---------------------------------------------------------------- 比較基準
+
+
+def write_fixed_layout(rd: Path, payload: dict) -> None:
+    """booths.yaml の固定配置の評価結果を保存する(比較基準)。"""
+    _write_json_atomic(rd / "fixed_layout.json", payload)
+
+
+def read_fixed_layout(rd: Path) -> dict:
+    """比較基準を読む。未評価なら available: False を返す。"""
+    return _read_json(rd / "fixed_layout.json") or {
+        "available": False,
+        "reason": "まだ評価されていません",
+    }
+
+
 def list_runs() -> list[str]:
     """実行 ID を新しい順に返す。"""
     if not RUNS_DIR.is_dir():
