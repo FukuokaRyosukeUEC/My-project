@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 import time
 import traceback
+from dataclasses import replace
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -27,10 +28,15 @@ sys.path.insert(0, str(ROOT))
 
 from pymoo.core.problem import StarmapParallelization  # noqa: E402
 
+from src.constraints import compute_violation  # noqa: E402
 from src.models import load_config  # noqa: E402
 from src.optimization import run_nsga2, save_results  # noqa: E402
-from src.parallel import init_worker  # noqa: E402
+from src.parallel import build_context, evaluate_layout, init_worker  # noqa: E402
 from ui import run_store  # noqa: E402
+
+#: 実会場配置の評価に使うタイムアウト(秒)。
+#: 最適化中の打ち切り(§17.6)とは別に、比較基準は必ず完走させたいので長くとる。
+BASELINE_TIMEOUT_SECONDS = 3600.0
 
 
 def _population_snapshot(algorithm) -> list[dict]:
@@ -93,6 +99,73 @@ def _population_snapshot(algorithm) -> list[dict]:
     return rows
 
 
+def evaluate_fixed_layout(cfg, rd: Path) -> dict:
+    """booths.yaml の fixed_position を評価し、比較基準として保存する。
+
+    実際に使われた会場配置(調布市マルシェの実配置)を最適化解と
+    同じ条件でシミュレーションし、パレート図に重ねられるようにする。
+    `scripts/run_optimization.py` の `fixed_f` と同じ位置づけだが、
+    こちらは制約違反や評価失敗でも例外を投げず、
+    `available: false` を記録して最適化本体は続行する。
+    """
+    payload: dict = {"available": False}
+
+    missing = [
+        spec.booth_id
+        for spec in cfg.booths
+        if spec.fixed_position is None
+    ]
+    if missing or not cfg.booths:
+        payload["reason"] = (
+            "booths.yaml に fixed_position が未設定のブースがあります"
+            f"(booth_id: {missing[:5]}{'…' if len(missing) > 5 else ''})"
+            if missing
+            else "ブースが定義されていません"
+        )
+        run_store.write_fixed_layout(rd, payload)
+        return payload
+
+    positions = tuple(
+        tuple(int(v) for v in spec.fixed_position)
+        for spec in cfg.booths
+    )
+
+    try:
+        # 比較基準は必ず完走させたいのでタイムアウトだけ緩める。
+        base_cfg = replace(cfg, timeout_seconds=BASELINE_TIMEOUT_SECONDS)
+        ctx = build_context(base_cfg)
+
+        violation = float(compute_violation(base_cfg, ctx.venue, positions))
+        payload["violation"] = violation
+        payload["feasible"] = violation <= 0.0
+
+        if violation > 0.0:
+            # 制約違反でもシミュレーション自体は行い、参考値として残す。
+            payload["reason"] = (
+                f"固定配置が配置制約を満たしていません(g = {violation:g})。"
+                "参考値として表示します。"
+            )
+
+        result = evaluate_layout(ctx, positions)
+
+        payload.update(
+            available=True,
+            label="実会場配置(booths.yaml)",
+            positions=[list(p) for p in positions],
+            x=[int(v) for p in positions for v in p],
+            f_move=float(result.f_move),
+            f_congestion=float(result.f_congestion),
+            timed_out=bool(result.timed_out),
+        )
+
+    except Exception as exc:
+        payload["available"] = False
+        payload["reason"] = f"固定配置の評価に失敗しました: {exc}"
+
+    run_store.write_fixed_layout(rd, payload)
+    return payload
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit("usage: python -m ui.optimize_worker <run_dir>")
@@ -107,11 +180,30 @@ def main() -> None:
 
     run_store.write_status(
         rd,
-        state="running",
+        state="baseline",
         generation=0,
         n_generations=int(params.n_generations),
         started_at=t0,
         elapsed_seconds=0.0,
+        message="実会場配置(booths.yaml)を評価中",
+    )
+
+    # 最適化より先に比較基準を確定させる。
+    # 第 1 世代のスナップショットが出た時点でパレート図に重ねられる。
+    fixed = evaluate_fixed_layout(cfg, rd)
+    if fixed.get("available"):
+        print(
+            "実会場配置(booths.yaml): "
+            f"f_move = {fixed['f_move']:.6f}, "
+            f"f_congestion = {fixed['f_congestion']:.6e}"
+        )
+    else:
+        print(f"実会場配置の比較は無効: {fixed.get('reason', '不明')}")
+
+    run_store.write_status(
+        rd,
+        state="running",
+        elapsed_seconds=time.perf_counter() - t0,
         message="最適化を開始しました",
     )
 

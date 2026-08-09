@@ -139,6 +139,31 @@ def main() -> int:
         print("\nスナップショットが無いため中断します。")
         return 1
 
+    # --- 比較基準(booths.yaml の実会場配置)
+    fixed = run_store.read_fixed_layout(rd)
+    if args.venue == "real":
+        ok &= check(
+            "実会場配置の比較基準が評価されている",
+            fixed.get("available", False),
+            fixed.get("reason", ""),
+        )
+        if fixed.get("available"):
+            ok &= check(
+                "実会場配置が配置制約を満たす",
+                fixed.get("feasible", False),
+                f"g = {fixed.get('violation', '?')}",
+            )
+            print(
+                f"  実会場配置    : f_move {fixed['f_move']:.4f} / "
+                f"f_congestion {fixed['f_congestion']:.4g}"
+            )
+    else:
+        ok &= check(
+            "矩形モードでは比較基準が無効",
+            not fixed.get("available", False),
+            "fixed_position は実会場座標のため落としている",
+        )
+
     snap = run_store.read_snapshot(rd, gens[-1])
     sols = snap["solutions"]
     print(f"  最終世代の実行可能解: {len(sols)} 件")
@@ -152,6 +177,15 @@ def main() -> int:
         "非支配解(rank 0)が存在する",
         any(s["rank"] == 0 for s in sols),
     )
+
+    if fixed.get("available") and sols:
+        n_dom = sum(
+            1
+            for s in sols
+            if s["f_move"] < fixed["f_move"]
+            and s["f_congestion"] < fixed["f_congestion"]
+        )
+        print(f"  実会場を両目的で上回る解: {n_dom} / {len(sols)}")
 
     # ------------------------------------------------------------ 手順 3
     step(3, "選択解の可視化")

@@ -38,6 +38,11 @@ st.set_page_config(
 
 POLL_SECONDS = 2.0
 
+#: 比較基準(booths.yaml の fixed_position = 実会場で実際に使われた配置)を
+#: スナップショット内の解と区別するための擬似インデックス。
+BASELINE_INDEX = -1
+BASELINE_COLOR = "#2ca02c"
+
 
 # ================================================================ キャッシュ
 
@@ -78,6 +83,37 @@ def cached_series(config_dir: str, x: tuple) -> dict:
     cfg = get_config(config_dir)
     ctx = get_viz_context(config_dir)
     return render.simulate_series(cfg, ctx, x)
+
+
+@st.cache_data(show_spinner=False)
+def cached_fixed_layout(config_dir: str, run_dir: str) -> dict:
+    """booths.yaml の固定配置(実会場で実際に使われた配置)を評価する。
+
+    通常はワーカーが最適化の直前に評価して `fixed_layout.json` へ
+    書き出しているので、ここが呼ばれるのはこの機能より前に作られた
+    実行を開いたときだけ。
+    """
+    from ui.optimize_worker import evaluate_fixed_layout
+
+    return evaluate_fixed_layout(get_config(config_dir), Path(run_dir))
+
+
+def baseline_solution(fixed: dict) -> dict | None:
+    """比較基準を、パレート図の点と同じ形の dict にする。
+
+    `_index = -1` を目印にして、スナップショット内の解と区別する。
+    """
+    if not fixed.get("available"):
+        return None
+    return {
+        "_index": BASELINE_INDEX,
+        "x": [int(v) for v in fixed["x"]],
+        "f_move": float(fixed["f_move"]),
+        "f_congestion": float(fixed["f_congestion"]),
+        "rank": BASELINE_INDEX,
+        "label": fixed.get("label", "実会場配置(booths.yaml)"),
+        "feasible": bool(fixed.get("feasible", True)),
+    }
 
 
 @st.cache_data(show_spinner=False)
@@ -299,6 +335,7 @@ def progress_panel(run_id: str) -> None:
 
     label = {
         "starting": "起動中",
+        "baseline": "実会場配置を評価中",
         "running": "最適化中",
         "finalizing": "成果物を出力中",
         "done": "完了",
@@ -324,12 +361,16 @@ def progress_panel(run_id: str) -> None:
 # ================================================================ パレート図
 
 
-def pareto_figure(snapshot: dict, slots: list[dict] | None = None) -> go.Figure:
+def pareto_figure(
+    snapshot: dict,
+    slots: list[dict] | None = None,
+    baseline: dict | None = None,
+) -> go.Figure:
     rows = snapshot["solutions"]
     df = pd.DataFrame(rows)
 
     fig = go.Figure()
-    if df.empty:
+    if df.empty and baseline is None:
         fig.add_annotation(text="実行可能解がありません", showarrow=False)
         return fig
 
@@ -354,6 +395,58 @@ def pareto_figure(snapshot: dict, slots: list[dict] | None = None) -> go.Figure:
                 widths.append(4)
                 texts.append(f"<b>{tag}</b>")
         return colors, widths, texts
+
+    # --- 比較基準(実会場配置)を補助線 + 星マーカーで重ねる。
+    # 補助線を先に描いて最背面に置き、クリック判定は星マーカーだけが持つ。
+    if baseline is not None:
+        bx, by = baseline["f_move"], baseline["f_congestion"]
+
+        fig.add_hline(
+            y=by, line=dict(color=BASELINE_COLOR, width=1, dash="dash"),
+            opacity=0.45,
+        )
+        fig.add_vline(
+            x=bx, line=dict(color=BASELINE_COLOR, width=1, dash="dash"),
+            opacity=0.45,
+        )
+
+        tag = "" if baseline["_index"] not in tag_of else f"<b>{tag_of[baseline['_index']]}</b>"
+        fig.add_trace(
+            go.Scatter(
+                x=[bx], y=[by],
+                mode="markers+text",
+                name=baseline["label"],
+                marker=dict(
+                    size=20, color=BASELINE_COLOR, symbol="star",
+                    line=dict(
+                        color=(
+                            SERIES_COLORS[0]
+                            if tag_of.get(baseline["_index"]) == "A"
+                            else SERIES_COLORS[1]
+                        ) if baseline["_index"] in tag_of else "#ffffff",
+                        width=4 if baseline["_index"] in tag_of else 1,
+                    ),
+                ),
+                text=[tag],
+                textposition="bottom center",
+                textfont=dict(size=14),
+                customdata=[BASELINE_INDEX],
+                hovertemplate=(
+                    f"{baseline['label']}<br>"
+                    "f_move=%{x:.3f}<br>f_congestion=%{y:.4g}<extra></extra>"
+                ),
+            )
+        )
+
+    if df.empty:
+        fig.update_layout(
+            xaxis_title="f_move(移動負担: 自由歩行換算時間 [秒])",
+            yaxis_title="f_congestion(混雑度)",
+            height=460,
+            margin=dict(l=10, r=10, t=40, b=10),
+            title="この世代には実行可能解がありません(比較基準のみ表示)",
+        )
+        return fig
 
     front = df[df["rank"] == 0]
     rest = df[df["rank"] != 0]
@@ -389,6 +482,7 @@ def pareto_figure(snapshot: dict, slots: list[dict] | None = None) -> go.Figure:
         margin=dict(l=10, r=10, t=40, b=10),
         title=f"第 {snapshot['generation']} 世代の集団({len(df)} 解)",
         clickmode="event+select",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         # dragmode は既定の "zoom" のまま。"select" にすると単純クリックが
         # 空の矩形選択として扱われ、点のクリック選択が効かなくなる。
     )
@@ -406,8 +500,15 @@ def _selection_points(event) -> list:
     return list(points or [])
 
 
-def resolve_selection(snapshot: dict, event) -> dict | None:
-    """Plotly のクリックイベントから解 1 件を取り出す。"""
+def resolve_selection(
+    snapshot: dict,
+    event,
+    baseline: dict | None = None,
+) -> dict | None:
+    """Plotly のクリックイベントから解 1 件を取り出す。
+
+    customdata が BASELINE_INDEX(-1)なら比較基準(実会場配置)を返す。
+    """
     points = _selection_points(event)
     if not points:
         return None
@@ -418,8 +519,15 @@ def resolve_selection(snapshot: dict, event) -> dict | None:
         idx = idx[0] if idx else None
     try:
         i = int(idx)
+    except (TypeError, ValueError):
+        return None
+
+    if i == BASELINE_INDEX:
+        return dict(baseline) if baseline is not None else None
+
+    try:
         return dict(snapshot["solutions"][i], _index=i)
-    except (TypeError, ValueError, IndexError):
+    except IndexError:
         return None
 
 
@@ -430,22 +538,42 @@ def resolve_selection(snapshot: dict, event) -> dict | None:
 # そこでクリックを 1 件ずつ受け取り、A → B の順に 2 スロットへ溜める。
 
 
+def is_baseline(sol: dict) -> bool:
+    return int(sol.get("_index", 0)) == BASELINE_INDEX
+
+
+def solution_name(sol: dict) -> str:
+    """解の呼び名。比較基準だけ特別扱いする。"""
+    return sol.get("label", "実会場配置") if is_baseline(sol) else f"解 #{sol['_index']}"
+
+
 def slot_label(sol: dict) -> str:
+    tail = (
+        "比較基準" if is_baseline(sol) else f"rank {sol['rank']}"
+    )
     return (
-        f"#{sol['_index']}  f_move={sol['f_move']:.1f} / "
-        f"f_cong={sol['f_congestion']:.4g} / rank {sol['rank']}"
+        f"{solution_name(sol)}  f_move={sol['f_move']:.1f} / "
+        f"f_cong={sol['f_congestion']:.4g} / {tail}"
     )
 
 
-def update_slots(gen: int, event, snapshot: dict) -> list[dict]:
+def update_slots(
+    gen: int,
+    event,
+    snapshot: dict,
+    baseline: dict | None = None,
+) -> list[dict]:
     """クリックを A/B スロットに反映して、現在のスロットを返す。"""
     # 世代を切り替えたら解の並びが変わるのでスロットを捨てる。
+    # ただし比較基準は世代に依存しないので残す。
     if st.session_state.get("slot_gen") != gen:
         st.session_state["slot_gen"] = gen
-        st.session_state["slots"] = []
+        st.session_state["slots"] = [
+            s for s in st.session_state.get("slots", []) if is_baseline(s)
+        ]
         st.session_state["slot_sig"] = None
 
-    picked = resolve_selection(snapshot, event)
+    picked = resolve_selection(snapshot, event, baseline)
     sig = None if picked is None else picked["_index"]
 
     # 他ウィジェット操作による再実行では選択内容が変わらないので、
@@ -535,25 +663,54 @@ def comparison_panel(run_id: str, snapshot: dict, picked: list[dict]) -> None:
 
     a, b = picked[0], picked[1]
     labels = [
-        f"解 A(f_move={a['f_move']:.1f} / f_cong={a['f_congestion']:.4g})",
-        f"解 B(f_move={b['f_move']:.1f} / f_cong={b['f_congestion']:.4g})",
+        f"A: {solution_name(s)}"
+        f"(f_move={s['f_move']:.1f} / f_cong={s['f_congestion']:.4g})"
+        if i == 0
+        else f"B: {solution_name(s)}"
+        f"(f_move={s['f_move']:.1f} / f_cong={s['f_congestion']:.4g})"
+        for i, s in enumerate((a, b))
     ]
     xs = [tuple(int(v) for v in s["x"]) for s in (a, b)]
+
+    def rate(new: float, old: float) -> str:
+        """old を基準にした改善率(小さいほど良い目的関数)。"""
+        if old == 0:
+            return "—"
+        return f"{(old - new) / old * 100:+.1f} %"
 
     # --- 指標の横並び
     df_kpi = pd.DataFrame(
         {
-            "解 A": [a["f_move"], a["f_congestion"], a["rank"]],
-            "解 B": [b["f_move"], b["f_congestion"], b["rank"]],
+            f"A({solution_name(a)})": [
+                f"{a['f_move']:.3f}",
+                f"{a['f_congestion']:.4g}",
+                "比較基準" if is_baseline(a) else f"rank {a['rank']}",
+            ],
+            f"B({solution_name(b)})": [
+                f"{b['f_move']:.3f}",
+                f"{b['f_congestion']:.4g}",
+                "比較基準" if is_baseline(b) else f"rank {b['rank']}",
+            ],
             "差(B - A)": [
-                b["f_move"] - a["f_move"],
-                b["f_congestion"] - a["f_congestion"],
-                b["rank"] - a["rank"],
+                f"{b['f_move'] - a['f_move']:+.3f}",
+                f"{b['f_congestion'] - a['f_congestion']:+.4g}",
+                "",
+            ],
+            "A 比の改善(B)": [
+                rate(b["f_move"], a["f_move"]),
+                rate(b["f_congestion"], a["f_congestion"]),
+                "",
             ],
         },
-        index=["f_move", "f_congestion", "rank"],
+        index=["f_move(移動負担)", "f_congestion(混雑度)", "順位"],
     )
     st.dataframe(df_kpi, width="stretch")
+
+    if is_baseline(a) or is_baseline(b):
+        st.caption(
+            "★ が実会場で実際に使われた配置(booths.yaml の fixed_position)です。"
+            "「A 比の改善」が + なら B のほうが良い(目的関数は小さいほど良い)。"
+        )
 
     st.caption(
         "推移グラフは 2 解をそれぞれ 1 回シミュレーションして描画します"
@@ -597,19 +754,149 @@ def comparison_panel(run_id: str, snapshot: dict, picked: list[dict]) -> None:
             st.image(cached_layout_png(config_dir, x, cache_dir))
 
 
+# ================================================================ 比較基準
+
+
+def _dominance_summary(snapshot: dict, baseline: dict) -> tuple[int, int, dict | None]:
+    """比較基準に対する優劣を数える。
+
+    戻り値は (両目的とも上回る解の数, 実行可能解の総数, 最も改善幅の
+    大きい非支配解)。「上回る」は 2 目的とも厳密に小さいこと(支配)。
+    """
+    sols = snapshot["solutions"]
+    bm, bc = baseline["f_move"], baseline["f_congestion"]
+
+    dominating = [
+        s for s in sols
+        if s["f_move"] < bm and s["f_congestion"] < bc
+    ]
+
+    best = None
+    if dominating:
+        # 2 目的の改善率の和が最大のものを代表として出す。
+        best = max(
+            dominating,
+            key=lambda s: (
+                (bm - s["f_move"]) / bm if bm else 0.0
+            ) + (
+                (bc - s["f_congestion"]) / bc if bc else 0.0
+            ),
+        )
+        best = dict(best, _index=sols.index(best))
+
+    return len(dominating), len(sols), best
+
+
+def baseline_panel(run_id: str, snapshot: dict) -> dict | None:
+    """比較基準の読み込み・表示を行い、パレート図に渡す dict を返す。"""
+    rd = run_store.run_dir(run_id)
+    fixed = run_store.read_fixed_layout(rd)
+
+    if not fixed.get("available"):
+        params = run_store._read_json(rd / "params.json") or {}
+        if params.get("venue_mode") != "real":
+            # 矩形会場には fixed_position が無い(座標が実会場前提のため
+            # build_config_dir で落としている)。比較基準は作れない。
+            st.caption(
+                "矩形会場モードのため、実会場配置(booths.yaml の "
+                "fixed_position)との比較はありません。"
+            )
+            return None
+
+        if not (rd / "fixed_layout.json").exists():
+            # この機能より前に作られた実行。ボタンで後から評価できるようにする。
+            c1, c2 = st.columns([3, 1])
+            c1.caption(
+                "この実行には実会場配置との比較基準がありません"
+                "(この機能より前に開始された実行です)。"
+            )
+            if c2.button("実会場配置を評価", width="stretch", key=f"evalfix_{run_id}"):
+                with st.spinner("実会場配置をシミュレーション中..."):
+                    cached_fixed_layout(str(rd / "config"), str(rd))
+                st.rerun()
+            return None
+
+        st.caption(f"実会場配置との比較は無効です — {fixed.get('reason', '不明')}")
+        return None
+
+    baseline = baseline_solution(fixed)
+    n_dom, n_total, best = _dominance_summary(snapshot, baseline)
+
+    c1, c2, c3 = st.columns([2, 1, 2])
+    c1.markdown(
+        f"<span style='color:{BASELINE_COLOR}'><b>★ {baseline['label']}</b></span>  "
+        f"f_move={baseline['f_move']:.3f} / "
+        f"f_congestion={baseline['f_congestion']:.4g}",
+        unsafe_allow_html=True,
+    )
+    c2.metric(
+        "実会場を両目的で上回る解",
+        f"{n_dom} / {n_total}",
+        help="f_move と f_congestion の両方が実会場配置より小さい解の数。",
+    )
+    if best is not None:
+        dm = (baseline["f_move"] - best["f_move"]) / baseline["f_move"] * 100
+        dc = (
+            (baseline["f_congestion"] - best["f_congestion"])
+            / baseline["f_congestion"] * 100
+        )
+        c3.markdown(
+            f"最大改善: **f_move −{dm:.1f}%** / **f_congestion −{dc:.1f}%**  \n"
+            f"<small>解 #{best['_index']}(rank {best['rank']})</small>",
+            unsafe_allow_html=True,
+        )
+    else:
+        c3.markdown(
+            "<small>この世代には、実会場配置を両目的で上回る解はまだありません。</small>",
+            unsafe_allow_html=True,
+        )
+
+    if not baseline["feasible"]:
+        st.caption(
+            "※ 実会場配置は現在の設定では配置制約を満たしていません(参考値として表示)。"
+        )
+
+    return baseline
+
+
 # ================================================================ 解の可視化
 
 
-def solution_panel(run_id: str, snapshot: dict, solution: dict) -> None:
+def solution_panel(
+    run_id: str,
+    snapshot: dict,
+    solution: dict,
+    baseline: dict | None = None,
+) -> None:
     rd = run_store.run_dir(run_id)
     config_dir = str(rd / "config")
     cache_dir = str(rd / "ui_cache")
     x = tuple(int(v) for v in solution["x"])
 
+    # 比較基準があれば、実会場配置に対する増減を metric の delta に出す。
+    # 目的関数は小さいほど良いので delta_color は "inverse"。
+    show_delta = baseline is not None and not is_baseline(solution)
+
+    def delta(key: str) -> str | None:
+        if not show_delta or baseline[key] == 0:
+            return None
+        diff = solution[key] - baseline[key]
+        return f"{diff:+.3g}({diff / baseline[key] * 100:+.1f}% 実会場比)"
+
     m1, m2, m3 = st.columns(3)
-    m1.metric("f_move", f"{solution['f_move']:.3f}")
-    m2.metric("f_congestion", f"{solution['f_congestion']:.4g}")
-    m3.metric("世代 / 順位", f"{snapshot['generation']} / rank {solution['rank']}")
+    m1.metric("f_move", f"{solution['f_move']:.3f}",
+              delta=delta("f_move"), delta_color="inverse")
+    m2.metric("f_congestion", f"{solution['f_congestion']:.4g}",
+              delta=delta("f_congestion"), delta_color="inverse")
+    if is_baseline(solution):
+        m3.metric("種別", "実会場配置")
+    else:
+        m3.metric("世代 / 順位", f"{snapshot['generation']} / rank {solution['rank']}")
+
+    if is_baseline(solution) and not solution.get("feasible", True):
+        st.warning(
+            "この配置は現在の設定では配置制約を満たしていません(参考値)。"
+        )
 
     tab_layout, tab_heat, tab_anim = st.tabs(
         ["会場レイアウト図", "混雑ヒートマップ", "エージェント動画"]
@@ -710,6 +997,9 @@ def main() -> None:
         st.warning("スナップショットを読み込めませんでした。")
         return
 
+    # --- 比較基準(実会場で実際に使われた配置)
+    baseline = baseline_panel(run_id, snapshot)
+
     left, right = st.columns([1, 1])
 
     with left:
@@ -717,6 +1007,7 @@ def main() -> None:
         st.caption(
             "点を続けて 2 つクリックすると A・B に入り、下で推移を比較できます。"
             "3 つ目をクリックすると古い方(A)が押し出されます。"
+            "★(実会場配置)もクリックして比較対象にできます。"
             "やり直すときは「選択をクリア」。"
         )
         nonce = st.session_state.get("pareto_nonce", 0)
@@ -724,10 +1015,12 @@ def main() -> None:
 
         # 図を描く前に選択状態を反映しておく。描画後のイベントだけを見ると
         # A/B の枠線が 1 クリック遅れて表示されるため。
-        slots = update_slots(gen, st.session_state.get(chart_key), snapshot)
+        slots = update_slots(
+            gen, st.session_state.get(chart_key), snapshot, baseline
+        )
 
         event = st.plotly_chart(
-            pareto_figure(snapshot, slots),
+            pareto_figure(snapshot, slots, baseline),
             width="stretch",
             on_select="rerun",
             selection_mode="points",
@@ -735,7 +1028,7 @@ def main() -> None:
         )
 
         # session_state 経由で拾えなかった場合の保険。
-        after = update_slots(gen, event, snapshot)
+        after = update_slots(gen, event, snapshot, baseline)
         if [s["_index"] for s in after] != [s["_index"] for s in slots]:
             st.rerun()
         slots = after
@@ -751,11 +1044,11 @@ def main() -> None:
                 st.caption(
                     "未選択のため、この世代の f_move 最小解を表示しています。"
                 )
-                selected = solutions[0]
+                selected = dict(solutions[0], _index=0)
         if selected is None:
             st.info("この世代には実行可能解がありません。")
         else:
-            solution_panel(run_id, snapshot, selected)
+            solution_panel(run_id, snapshot, selected, baseline)
 
     # --- 2 解の比較
     st.divider()
