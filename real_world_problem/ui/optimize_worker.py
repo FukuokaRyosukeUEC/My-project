@@ -8,9 +8,9 @@ Streamlit のプロセス内で最適化を回すと、
 という 2 つの問題が出るため、独立プロセスとして分離する。
 UI との通信は run_dir 配下のファイルのみ(run_store.py 参照)。
 
-既存の `scripts/run_optimization.py` と同じ関数(run_nsga2 / save_results)を
-呼ぶだけで、最適化ロジックには手を入れない。世代ごとのスナップショット出力は
-`run_nsga2(on_generation=...)` の任意フックとして差し込む。
+`scripts/run_optimization.py` と同じ直接配置方式
+(`run_direct_nsga2` / `save_results` / `save_direct_metadata`)を呼ぶ。
+世代ごとのスナップショット出力は `on_generation` フックとして差し込む。
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import sys
 import time
 import traceback
 from dataclasses import replace
+from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -28,15 +29,81 @@ sys.path.insert(0, str(ROOT))
 
 from pymoo.core.problem import StarmapParallelization  # noqa: E402
 
-from src.constraints import compute_violation  # noqa: E402
+from src.constraints import (  # noqa: E402
+    compute_violation,
+    design_variable_count,
+    positions_to_design,
+)
+from src.direct_optimization import (  # noqa: E402
+    OrderlinessLimits,
+    prepare_random_feasible_direct_population,
+    run_direct_nsga2,
+    save_direct_metadata,
+)
 from src.models import load_config  # noqa: E402
-from src.optimization import run_nsga2, save_results  # noqa: E402
+from src.optimization import save_results  # noqa: E402
 from src.parallel import build_context, evaluate_layout, init_worker  # noqa: E402
+from src.routing import warmup_routing_kernels  # noqa: E402
 from ui import run_store  # noqa: E402
 
 #: 実会場配置の評価に使うタイムアウト(秒)。
 #: 最適化中の打ち切り(§17.6)とは別に、比較基準は必ず完走させたいので長くとる。
 BASELINE_TIMEOUT_SECONDS = 3600.0
+
+
+def _orderliness_limits(params: run_store.RunParams) -> OrderlinessLimits:
+    """UI の上限値を直接配置問題の成分別制約へ変換する。"""
+    return OrderlinessLimits(
+        organization_nonmembership=params.max_organization_nonmembership,
+        motif_complexity=params.max_motif_complexity,
+        alignment_error=params.max_alignment_error,
+        gap_variation=params.max_gap_variation,
+        orientation=params.max_orientation_error,
+        isolation=params.max_isolation,
+        front_clearance=params.max_front_clearance_violation,
+    )
+
+
+def _run_direct(
+    cfg,
+    params: run_store.RunParams,
+    initial_population: np.ndarray,
+    on_generation,
+    elementwise_runner=None,
+):
+    """CLI と同じ直接配置 NSGA-II の引数を一か所に集約する。"""
+    return run_direct_nsga2(
+        cfg,
+        pop_size=params.population_size,
+        n_gen=params.n_generations,
+        elementwise_runner=elementwise_runner,
+        seed=params.optimization_seed,
+        orderliness_limits=_orderliness_limits(params),
+        initial_max_trials=params.initial_max_trials,
+        initial_genotypes=initial_population,
+        mutation_individual_prob=params.mutation_individual_prob,
+        mutation_local_weight=params.mutation_local_weight,
+        mutation_meso_weight=params.mutation_meso_weight,
+        mutation_macro_weight=params.mutation_macro_weight,
+        exploration_generations=params.exploration_generations,
+        exploration_individual_prob=params.exploration_individual_prob,
+        exploration_local_weight=params.exploration_local_weight,
+        exploration_meso_weight=params.exploration_meso_weight,
+        exploration_macro_weight=params.exploration_macro_weight,
+        donor_pool_size=params.donor_pool_size,
+        donor_minimum_distance=params.donor_minimum_distance,
+        donor_refresh_probability=params.donor_refresh_probability,
+        minimum_layout_distance=params.minimum_layout_distance,
+        orderliness_tightening_generations=(
+            params.orderliness_tightening_generations
+        ),
+        memetic_interval=params.memetic_interval,
+        memetic_start_generation=params.memetic_start_generation,
+        memetic_parents=params.memetic_parents,
+        memetic_neighbors=params.memetic_neighbors,
+        memetic_max_neighbor_trials=params.memetic_max_neighbor_trials,
+        on_generation=on_generation,
+    )
 
 
 def _population_snapshot(algorithm) -> list[dict]:
@@ -152,7 +219,7 @@ def evaluate_fixed_layout(cfg, rd: Path) -> dict:
             available=True,
             label="実会場配置(booths.yaml)",
             positions=[list(p) for p in positions],
-            x=[int(v) for p in positions for v in p],
+            x=[int(v) for v in positions_to_design(cfg, positions)],
             f_move=float(result.f_move),
             f_congestion=float(result.f_congestion),
             timed_out=bool(result.timed_out),
@@ -174,6 +241,7 @@ def main() -> None:
     params = run_store.RunParams.from_dict(
         run_store._read_json(rd / "params.json") or {}
     )
+    params.validate()
 
     cfg = load_config(rd / "config")
     t0 = time.perf_counter()
@@ -199,13 +267,6 @@ def main() -> None:
         )
     else:
         print(f"実会場配置の比較は無効: {fixed.get('reason', '不明')}")
-
-    run_store.write_status(
-        rd,
-        state="running",
-        elapsed_seconds=time.perf_counter() - t0,
-        message="最適化を開始しました",
-    )
 
     interval = max(1, int(params.snapshot_interval))
     last_gen = {"n": 0}
@@ -242,21 +303,64 @@ def main() -> None:
 
     try:
         workers = max(1, int(params.workers))
+        limits = _orderliness_limits(params)
+        run_store.write_status(
+            rd,
+            state="initializing",
+            generation=0,
+            n_generations=int(params.n_generations),
+            elapsed_seconds=time.perf_counter() - t0,
+            message="完全ランダムな物理制約充足初期集団を生成中",
+        )
+        warmup_routing_kernels()
+
         if workers > 1:
             with Pool(workers, initializer=init_worker, initargs=(cfg,)) as pool:
-                res = run_nsga2(
+                pool_starmap = partial(pool.starmap, chunksize=1)
+                initial_population = prepare_random_feasible_direct_population(
                     cfg,
                     pop_size=params.population_size,
-                    n_gen=params.n_generations,
-                    elementwise_runner=StarmapParallelization(pool.starmap),
-                    on_generation=on_generation,
+                    seed=params.optimization_seed,
+                    orderliness_limits=limits,
+                    initial_max_trials=params.initial_max_trials,
+                    starmap=pool_starmap,
+                )
+                run_store.write_status(
+                    rd,
+                    state="running",
+                    message=(
+                        f"{design_variable_count(cfg)}変数の"
+                        "直接配置NSGA-IIを開始しました"
+                    ),
+                )
+                res = _run_direct(
+                    cfg,
+                    params,
+                    initial_population,
+                    on_generation,
+                    elementwise_runner=StarmapParallelization(pool_starmap),
                 )
         else:
-            res = run_nsga2(
+            initial_population = prepare_random_feasible_direct_population(
                 cfg,
                 pop_size=params.population_size,
-                n_gen=params.n_generations,
-                on_generation=on_generation,
+                seed=params.optimization_seed,
+                orderliness_limits=limits,
+                initial_max_trials=params.initial_max_trials,
+            )
+            run_store.write_status(
+                rd,
+                state="running",
+                message=(
+                    f"{design_variable_count(cfg)}変数の"
+                    "直接配置NSGA-IIを開始しました"
+                ),
+            )
+            res = _run_direct(
+                cfg,
+                params,
+                initial_population,
+                on_generation,
             )
 
         if params.save_artifacts:
@@ -266,6 +370,7 @@ def main() -> None:
                 message="成果物(パレート解 CSV・代表解 JSON)を書き出し中",
             )
             save_results(cfg, res, rd / "results")
+            save_direct_metadata(res, rd / "results")
 
         run_store.write_status(
             rd,
@@ -273,7 +378,10 @@ def main() -> None:
             generation=last_gen["n"],
             elapsed_seconds=time.perf_counter() - t0,
             n_pareto=int(np.atleast_2d(res.F).shape[0]),
-            message="完了",
+            method=(
+                f"single_level_direct_{design_variable_count(cfg)}_layout_nsga2"
+            ),
+            message="直接配置NSGA-IIが完了しました",
         )
 
     except Exception:

@@ -7,7 +7,7 @@
 
 確認する内容:
   1. UI の入力値 → config YAML → load_config() が通るか
-  2. ワーカーと同じ経路で NSGA-II が回り、スナップショットが出るか
+  2. 完全ランダム初期集団から直接配置 NSGA-II が回り、スナップショットが出るか
   3. レイアウト図 / ヒートマップ / アニメーションが生成できるか
 
 pytest には載せていない。実行に十数秒〜数十秒かかるため、
@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.constraints import design_variable_count  # noqa: E402
 from src.models import load_config  # noqa: E402
 from ui import render, run_store  # noqa: E402
 
@@ -72,8 +73,17 @@ def main() -> int:
         n_generations=args.gen,
         workers=args.workers,
         snapshot_interval=args.interval,
+        # 縮小問題では手法の配線確認を目的とし、整然性制約は緩める。
+        max_organization_nonmembership=10.0,
+        max_motif_complexity=10.0,
+        max_alignment_error=10.0,
+        max_gap_variation=10.0,
+        max_orientation_error=10.0,
+        max_isolation=10.0,
+        max_front_clearance_violation=10.0,
         save_artifacts=False,
     )
+    params.validate()
 
     rd.mkdir(parents=True, exist_ok=True)
     run_store._write_json_atomic(rd / "params.json", params.to_dict())
@@ -107,7 +117,7 @@ def main() -> int:
         )
 
     # ------------------------------------------------------------ 手順 2
-    step(2, "ワーカー単体で NSGA-II を回す")
+    step(2, "ワーカー単体で直接配置 NSGA-II を回す")
 
     t0 = time.perf_counter()
     proc = subprocess.run(
@@ -125,6 +135,11 @@ def main() -> int:
 
     status = run_store.read_status(rd)
     ok &= check("status.json が done", status.get("state") == "done", str(status.get("state")))
+    ok &= check(
+        "新しい直接配置方式で実行されている",
+        str(status.get("method", "")).startswith("single_level_direct_"),
+        str(status.get("method", "未記録")),
+    )
 
     gens = run_store.list_snapshot_generations(rd)
     print(f"  スナップショット: {gens}")
@@ -169,9 +184,10 @@ def main() -> int:
     print(f"  最終世代の実行可能解: {len(sols)} 件")
     ok &= check("解に設計ベクトルが入っている", bool(sols) and "x" in sols[0])
     ok &= check(
-        "設計変数の次元 = ブース数 x 3",
-        bool(sols) and len(sols[0]["x"]) == len(cfg.booths) * 3,
-        f"{len(sols[0]['x']) if sols else 0} 次元",
+        "設計変数の次元が現行エンコーディングと一致",
+        bool(sols) and len(sols[0]["x"]) == design_variable_count(cfg),
+        f"{len(sols[0]['x']) if sols else 0} / "
+        f"期待 {design_variable_count(cfg)} 次元",
     )
     ok &= check(
         "非支配解(rank 0)が存在する",

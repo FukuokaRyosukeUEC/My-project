@@ -42,6 +42,10 @@ PRESET_CONFIG_DIRS = {
     "rect": REPO_ROOT / "test_problem" / "config",
 }
 
+# Streamlit の編集表で fixed_position を画面に出さず保持するための内部列。
+# カンマ区切り文字列にすることで Arrow/Pandas の list 型互換性に依存しない。
+EDITOR_FIXED_POSITION_FIELD = "_fixed_position"
+
 
 def run_dir(run_id: str) -> Path:
     return RUNS_DIR / run_id
@@ -83,6 +87,40 @@ class RunParams:
     workers: int = 4
     snapshot_interval: int = 10
 
+    # --- 直接配置 NSGA-II
+    optimization_seed: int = 1
+    initial_max_trials: int = 5000
+
+    # 整然性制約。scripts/run_optimization.py と同じ既定値。
+    max_organization_nonmembership: float = 0.30
+    max_motif_complexity: float = 1.20
+    max_alignment_error: float = 0.36
+    max_gap_variation: float = 0.20
+    max_orientation_error: float = 0.25
+    max_isolation: float = 0.20
+    max_front_clearance_violation: float = 0.0
+
+    # 3 段階突然変異 + Memetic 局所探索。
+    mutation_individual_prob: float = 0.20
+    mutation_local_weight: float = 0.55
+    mutation_meso_weight: float = 0.30
+    mutation_macro_weight: float = 0.15
+    exploration_generations: int = 30
+    exploration_individual_prob: float = 0.40
+    exploration_local_weight: float = 0.20
+    exploration_meso_weight: float = 0.30
+    exploration_macro_weight: float = 0.50
+    donor_pool_size: int = 32
+    donor_minimum_distance: float = 0.05
+    donor_refresh_probability: float = 0.25
+    minimum_layout_distance: float = 0.02
+    orderliness_tightening_generations: int = 40
+    memetic_interval: int = 5
+    memetic_start_generation: int = 30
+    memetic_parents: int = 10
+    memetic_neighbors: int = 10
+    memetic_max_neighbor_trials: int = 1000
+
     # --- 終了後の成果物出力
     save_artifacts: bool = True
 
@@ -105,6 +143,42 @@ class RunParams:
             "n_generations": int(self.n_generations),
             "workers": int(self.workers),
             "snapshot_interval": int(self.snapshot_interval),
+            "optimization_seed": int(self.optimization_seed),
+            "initial_max_trials": int(self.initial_max_trials),
+            "max_organization_nonmembership": float(
+                self.max_organization_nonmembership
+            ),
+            "max_motif_complexity": float(self.max_motif_complexity),
+            "max_alignment_error": float(self.max_alignment_error),
+            "max_gap_variation": float(self.max_gap_variation),
+            "max_orientation_error": float(self.max_orientation_error),
+            "max_isolation": float(self.max_isolation),
+            "max_front_clearance_violation": float(
+                self.max_front_clearance_violation
+            ),
+            "mutation_individual_prob": float(self.mutation_individual_prob),
+            "mutation_local_weight": float(self.mutation_local_weight),
+            "mutation_meso_weight": float(self.mutation_meso_weight),
+            "mutation_macro_weight": float(self.mutation_macro_weight),
+            "exploration_generations": int(self.exploration_generations),
+            "exploration_individual_prob": float(
+                self.exploration_individual_prob
+            ),
+            "exploration_local_weight": float(self.exploration_local_weight),
+            "exploration_meso_weight": float(self.exploration_meso_weight),
+            "exploration_macro_weight": float(self.exploration_macro_weight),
+            "donor_pool_size": int(self.donor_pool_size),
+            "donor_minimum_distance": float(self.donor_minimum_distance),
+            "donor_refresh_probability": float(self.donor_refresh_probability),
+            "minimum_layout_distance": float(self.minimum_layout_distance),
+            "orderliness_tightening_generations": int(
+                self.orderliness_tightening_generations
+            ),
+            "memetic_interval": int(self.memetic_interval),
+            "memetic_start_generation": int(self.memetic_start_generation),
+            "memetic_parents": int(self.memetic_parents),
+            "memetic_neighbors": int(self.memetic_neighbors),
+            "memetic_max_neighbor_trials": int(self.memetic_max_neighbor_trials),
             "save_artifacts": bool(self.save_artifacts),
         }
 
@@ -112,6 +186,82 @@ class RunParams:
     def from_dict(cls, d: dict) -> "RunParams":
         known = {k: v for k, v in d.items() if k in cls.__annotations__}
         return cls(**known)
+
+    def validate(self) -> None:
+        """直接配置最適化の設定を、ワーカー起動前にも検証する。"""
+        if int(self.population_size) < 4:
+            raise ValueError("探索個体数は 4 以上にしてください")
+        if int(self.n_generations) < 1:
+            raise ValueError("世代数は 1 以上にしてください")
+        if int(self.optimization_seed) < 0:
+            raise ValueError("最適化シードは 0 以上にしてください")
+        if int(self.initial_max_trials) < 1:
+            raise ValueError("初期個体の最大試行回数は 1 以上にしてください")
+
+        probability = float(self.mutation_individual_prob)
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("突然変異の個体確率は 0〜1 にしてください")
+        weights = (
+            float(self.mutation_local_weight),
+            float(self.mutation_meso_weight),
+            float(self.mutation_macro_weight),
+        )
+        if any(weight < 0.0 for weight in weights):
+            raise ValueError("突然変異の各スケール重みは 0 以上にしてください")
+        if abs(sum(weights) - 1.0) > 1e-9:
+            raise ValueError(
+                "突然変異の local / meso / macro 重みの合計を 1.0 にしてください"
+            )
+        exploration_probability = float(self.exploration_individual_prob)
+        if not 0.0 <= exploration_probability <= 1.0:
+            raise ValueError("初期探索の突然変異確率は 0〜1 にしてください")
+        exploration_weights = (
+            float(self.exploration_local_weight),
+            float(self.exploration_meso_weight),
+            float(self.exploration_macro_weight),
+        )
+        if any(weight < 0.0 for weight in exploration_weights) or abs(
+            sum(exploration_weights) - 1.0
+        ) > 1e-9:
+            raise ValueError("初期探索の3スケール突然変異重みの合計を 1.0 にしてください")
+        if int(self.exploration_generations) < 0:
+            raise ValueError("初期大域探索の世代数は 0 以上にしてください")
+        if int(self.donor_pool_size) < 1:
+            raise ValueError("大域ドナープール数は 1 以上にしてください")
+        for name, value in (
+            ("ドナー最小距離", self.donor_minimum_distance),
+            ("ドナー更新確率", self.donor_refresh_probability),
+            ("近似重複判定距離", self.minimum_layout_distance),
+        ):
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name}は 0〜1 にしてください")
+        if int(self.orderliness_tightening_generations) < 1:
+            raise ValueError("整然性制約の移行世代数は 1 以上にしてください")
+
+        limits = (
+            self.max_organization_nonmembership,
+            self.max_motif_complexity,
+            self.max_alignment_error,
+            self.max_gap_variation,
+            self.max_orientation_error,
+            self.max_isolation,
+            self.max_front_clearance_violation,
+        )
+        if any(float(limit) < 0.0 for limit in limits):
+            raise ValueError("整然性制約の上限値は 0 以上にしてください")
+
+        if int(self.memetic_interval) < 1:
+            raise ValueError("Memetic の実行間隔は 1 以上にしてください")
+        if int(self.memetic_start_generation) < 1:
+            raise ValueError("Memetic の開始世代は 1 以上にしてください")
+        if int(self.memetic_parents) < 1:
+            raise ValueError("Memetic の親個体数は 1 以上にしてください")
+        if int(self.memetic_neighbors) < 1:
+            raise ValueError("Memetic の近傍数は 1 以上にしてください")
+        if int(self.memetic_max_neighbor_trials) < int(self.memetic_neighbors):
+            raise ValueError(
+                "Memetic の最大近傍試行回数は、近傍数以上にしてください"
+            )
 
 
 # ---------------------------------------------------------------- 設定 YAML 生成
@@ -227,6 +377,44 @@ def _normalize_booths(booths: list, venue_mode: str) -> list:
                 row["fixed_position"] = [int(v) for v in b["fixed_position"]]
         out.append(row)
     return out
+
+
+def restore_editor_fixed_positions(booths: list, venue_mode: str) -> list:
+    """編集表の非表示列から fixed_position を復元する。
+
+    実会場モードだけ既存配置を引き継ぐ。UIで追加した行は内部列が空なので
+    fixed_position 未設定のままとし、誤った比較基準を作らない。
+    """
+    restored = []
+    for booth in booths:
+        row = dict(booth)
+        raw = row.pop(EDITOR_FIXED_POSITION_FIELD, "")
+        if venue_mode == "real":
+            if isinstance(raw, (list, tuple)):
+                values = [int(value) for value in raw]
+            else:
+                text = str(raw).strip()
+                if text in {"", "None", "nan", "<NA>"}:
+                    values = []
+                else:
+                    try:
+                        values = [int(value.strip()) for value in text.split(",")]
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"既存配置座標を復元できません: {raw!r}"
+                        ) from exc
+            if values:
+                is_table = str(row.get("kind", "booth")) == "table"
+                expected_length = 2 if is_table else 3
+                if len(values) != expected_length:
+                    raise ValueError(
+                        "既存配置座標の要素数が不正です: "
+                        f"kind={row.get('kind', 'booth')}, "
+                        f"expected={expected_length}, values={values}"
+                    )
+                row["fixed_position"] = values
+        restored.append(row)
+    return restored
 
 
 def _dump_yaml(path: Path, data) -> None:
