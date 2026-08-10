@@ -27,6 +27,7 @@ class VisitorRecord:
     distance_weight_factor: float
     interests: tuple  # カテゴリ別興味 [0,1]
     table_after_food_propensity: float = 1.0  # 配置に依存しない着席選好 U(0,1)
+    is_passerby: bool = False  # ブースへ行かず会場を通り抜けるだけの通行人
 
 
 def generate_visitor_table(cfg: Config) -> tuple:
@@ -87,6 +88,7 @@ def generate_visitor_table(cfg: Config) -> tuple:
                 distance_weight_factor=prof.distance_weight_factor,
                 interests=tuple(float(v) for v in interests),
                 table_after_food_propensity=float(rng.random()),
+                is_passerby=bool(prof.passerby),
             )
         )
     return tuple(records)
@@ -107,6 +109,7 @@ def instantiate_visitors(records: tuple) -> list:
             distance_weight_factor=r.distance_weight_factor,
             profile_name=r.profile_name,
             table_after_food_propensity=getattr(r, "table_after_food_propensity", 1.0),
+            is_passerby=bool(getattr(r, "is_passerby", False)),
             state=NOT_ARRIVED,
         )
         for r in records

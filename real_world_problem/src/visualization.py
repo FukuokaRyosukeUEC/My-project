@@ -744,10 +744,46 @@ def comparison_table(results: dict[str, dict], path: str | Path) -> pd.DataFrame
 
 
 def render_animation(cfg: Config, layout: Layout, frames, path: str | Path, fps: int = 8) -> None:
-    """§20.1: エージェントアニメーション(GIF)。frames は Simulation.record_frames の出力。"""
-    fig, ax = plt.subplots(figsize=(10, 6))
-    fig.subplots_adjust(right=0.72)
+    """§20.1: エージェントアニメーション(GIF)。frames は Simulation.record_frames の出力。
+
+    右側の「ブース別人数」欄はブース数が多いと1列では図の下端で見切れるため、
+    1列に収まらない分は隣に新しい列を作って折り返す(列数に応じて図の横幅も広げる)。
+    """
+    header_lines = ["ブース別人数", "（体験中 / 待機中）"]
+    max_lines_per_column = 17  # ヘッダー込みの1列の行数上限(9pt・行間1.5 で見切れない範囲)
+    column_width_in = 1.2  # 1列("B31: 12 / 34" 相当)の占有幅
+    header_width_in = 1.5  # ヘッダー「（体験中 / 待機中）」の占有幅
+    fig_height_in = 6.0
+    left_margin_in = 1.25
+    box_width_in = 5.95  # 元の figsize(10, 6) / right=0.72 と同じ会場描画枠
+
+    booth_ids = [b.booth_id for b in cfg.booths if not b.is_table]
+    rows_per_column = max(1, max_lines_per_column - len(header_lines))
+    booth_columns = [
+        booth_ids[i:i + rows_per_column] for i in range(0, len(booth_ids), rows_per_column)
+    ] or [[]]
+
+    fig, ax = plt.subplots(figsize=(10, fig_height_in))
+
+    def adjust_margins(width_in: float) -> None:
+        """会場描画枠をインチ基準で固定する(横幅を変えても会場図の大きさを保つ)。"""
+        fig.subplots_adjust(
+            left=left_margin_in / width_in,
+            right=(left_margin_in + box_width_in) / width_in,
+        )
+
+    adjust_margins(10)
     draw_venue(ax, cfg, layout)
+    # aspect="equal" で縮んだ後の実描画領域(インチ)を測り、人数欄の列数に合わせて横幅を決める。
+    fig.canvas.draw()
+    ax_box = ax.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+    text_left_in = ax_box.x1 + 0.02 * ax_box.width  # 凡例と同じ 1.02(軸座標)の位置
+    fig_width = max(
+        10.0,
+        text_left_in + max(column_width_in * len(booth_columns), header_width_in) + 0.15,
+    )
+    fig.set_size_inches(fig_width, fig_height_in)
+    adjust_margins(fig_width)
     scat = ax.scatter([], [], s=18)
     label = ax.text(0.01, 0.99, "", transform=ax.transAxes, va="top", fontsize=9)
     legend_handles = [
@@ -771,16 +807,20 @@ def render_animation(cfg: Config, layout: Layout, frames, path: str | Path, fps:
         fontsize=8,
         title_fontsize=9,
     )
-    booth_count_text = ax.text(
-        1.02,
-        0.60,
-        "",
-        transform=ax.transAxes,
-        va="top",
-        ha="left",
-        fontsize=9,
-        linespacing=1.5,
-    )
+    column_offset = column_width_in / ax_box.width
+    booth_count_texts = [
+        ax.text(
+            1.02 + col_idx * column_offset,
+            0.60,
+            "",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=9,
+            linespacing=1.5,
+        )
+        for col_idx in range(len(booth_columns))
+    ]
 
     def update(i):
         t, snap, booth_stats = frames[i]
@@ -793,14 +833,15 @@ def render_animation(cfg: Config, layout: Layout, frames, path: str | Path, fps:
         scat.set_offsets(np.c_[xs, ys] if xs else np.empty((0, 2)))
         scat.set_color(colors)
         label.set_text(f"t = {t * cfg.dt_seconds:.0f} s  agents = {len(snap)}")
-        count_lines = ["ブース別人数", "（体験中 / 待機中）"]
-        count_lines.extend(
-            f"B{booth_id + 1}: {active:>2} / {queued:>2}"
-            for booth_id, active, queued in booth_stats
-            if not cfg.booths[booth_id].is_table
-        )
-        booth_count_text.set_text("\n".join(count_lines))
-        return scat, label, booth_count_text
+        stats_by_id = {booth_id: (active, queued) for booth_id, active, queued in booth_stats}
+        for col_idx, ids in enumerate(booth_columns):
+            # 2列目以降はヘッダー分を空行にして、各列の行位置を揃える。
+            lines = list(header_lines) if col_idx == 0 else [""] * len(header_lines)
+            for booth_id in ids:
+                active, queued = stats_by_id.get(booth_id, (0, 0))
+                lines.append(f"B{booth_id + 1}: {active:>2} / {queued:>2}")
+            booth_count_texts[col_idx].set_text("\n".join(lines))
+        return (scat, label, *booth_count_texts)
 
     ani = animation.FuncAnimation(fig, update, frames=len(frames), blit=True)
     ani.save(path, writer=animation.PillowWriter(fps=fps))
