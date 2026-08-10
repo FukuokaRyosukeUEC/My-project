@@ -39,6 +39,10 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
     cfg: Config = sim.cfg
     spawned = [v for v in sim.visitors if v.state != NOT_ARRIVED]
     n_spawned = len(spawned)
+    # 素通り客(ブースへ行かない通行人)。混雑・移動負担には通常どおり
+    # 含めるが、体験系 KPI は「ブース目当てで来た人」だけの値も併記する。
+    passersby = [v for v in spawned if getattr(v, "is_passerby", False)]
+    booth_goers = [v for v in spawned if not getattr(v, "is_passerby", False)]
 
     # --- 目的関数 1: 移動負担(自由歩行換算時間, §12.1)
     if n_spawned:
@@ -125,6 +129,24 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
         "food_table_visit_total": food_table_visits,
         "food_table_followthrough_rate": (
             food_table_visits / food_table_requests if food_table_requests else 1.0
+        ),
+
+        # --- 素通り客(広場を通り抜けるだけの通行人)
+        "passerby_total": len(passersby),
+        "passerby_rate": len(passersby) / n_spawned if n_spawned else 0.0,
+        "mean_passerby_walk_seconds": (
+            float(np.mean([free_walk_seconds(v, cfg) for v in passersby]))
+            if passersby else 0.0
+        ),
+        # 上の体験系 KPI は素通り客も母数に含むため、ブース目当ての来場者だけの
+        # 値も併記する(素通り客がいなければ同じ値になる)。
+        "mean_booths_experienced_booth_goers": (
+            float(np.mean([len(v.visited_booths) for v in booth_goers]))
+            if booth_goers else 0.0
+        ),
+        "mean_happiness_booth_goers": (
+            float(np.mean([happiness(v, cfg) for v in booth_goers]))
+            if booth_goers else 0.0
         ),
     }
     return f_move, f_congestion, kpis

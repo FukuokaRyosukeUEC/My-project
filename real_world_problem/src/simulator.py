@@ -43,6 +43,31 @@ from .venue import (
 from .visitors import instantiate_visitors
 
 
+def _connected_cell_groups(cells) -> tuple:
+    """セル集合を 4 近傍で連結成分に分ける(開口部を「1 つの出入口」単位にする)。
+
+    戻り値は frozenset のタプル。走査順は入力順に依存させないため、
+    各成分の最小セル座標でソートして決定的にする。
+    """
+    remaining = set(tuple(int(v) for v in c) for c in cells)
+    groups: list[frozenset] = []
+    while remaining:
+        seed = min(remaining)
+        remaining.discard(seed)
+        component = {seed}
+        stack = [seed]
+        while stack:
+            x, y = stack.pop()
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if (nx, ny) in remaining:
+                    remaining.discard((nx, ny))
+                    component.add((nx, ny))
+                    stack.append((nx, ny))
+        groups.append(frozenset(component))
+    groups.sort(key=min)
+    return tuple(groups)
+
+
 @dataclass
 class SimResult:
     """1 配置評価の結果。"""
@@ -111,6 +136,16 @@ class Simulation:
             )
         self.exit_field = bfs_distance_field(self.walkable, venue.exit_cells)
         self.exit_set = set(venue.exit_cells)
+        # 開口部(出入口)を連結成分ごとにまとめる。素通り客は「入ってきた
+        # 開口部とは別の開口部」を目的地にするため、その候補集合として使う。
+        self.exit_groups = _connected_cell_groups(venue.exit_cells)
+        self._exit_group_of = {
+            cell: index
+            for index, group in enumerate(self.exit_groups)
+            for cell in group
+        }
+        # 開口部ごとの静的距離場は、素通り客が実際に向かった分だけ遅延生成する。
+        self._exit_group_fields: dict[int, np.ndarray] = {}
 
         # 来場者(テーブルから毎回新規生成)・ブース実行時状態
         self.visitors: list[Visitor] = instantiate_visitors(visitor_records)
@@ -385,6 +420,10 @@ class Simulation:
             v.position = cell
             self._set_state(v, CHOOSING)
             v.actual_spawn_step = t
+            if v.is_passerby:
+                # 素通り客は入場した時点で反対側の開口部へ歩き出す(§8 の
+                # 目的地選択は行わない)。
+                self._start_passing_through(v)
 
     def _free_entrance_cell(self) -> tuple | None:
         candidates = [
@@ -672,10 +711,52 @@ class Simulation:
         )
         return min(1.0, mean_ratio)
 
+    def _exit_goal_set(self, v: Visitor) -> set:
+        """退出先セル集合。素通り客だけ「入口とは別の開口部」に限定される。"""
+        if v.exit_goal_group is None:
+            return self.exit_set
+        return self.exit_groups[v.exit_goal_group]
+
+    def _exit_heuristic(self, v: Visitor) -> np.ndarray:
+        """退出先までの静的距離場。A* は距離場が 0 のセルを目標とみなす。"""
+        if v.exit_goal_group is None:
+            return self.exit_field
+        field_g = self._exit_group_fields.get(v.exit_goal_group)
+        if field_g is None:
+            # 素通り客が実際に使う開口部の分だけ BFS する(通常は数回)。
+            field_g = bfs_distance_field(
+                self.walkable, tuple(sorted(self.exit_groups[v.exit_goal_group]))
+            )
+            self._exit_group_fields[v.exit_goal_group] = field_g
+        return field_g
+
+    def _start_passing_through(self, v: Visitor) -> None:
+        """素通り客の退出先を決めて歩き出させる(§8 の目的地選択は行わない)。
+
+        入場した開口部と同じ開口部を目的地にすると、その場で退出扱いになり
+        会場内をまったく歩かないので、必ず別の連結成分の開口部を選ぶ。
+        開口部が 1 か所しかない会場では通り抜けようがないため、
+        通常の来場者(CHOOSING)として扱う。
+        """
+        entry_group = self._exit_group_of.get(v.position)
+        others = [
+            index
+            for index in range(len(self.exit_groups))
+            if index != entry_group
+        ]
+        if not others:
+            v.is_passerby = False
+            self._set_state(v, CHOOSING)
+            return
+        idx = int(self._rng_of(v.visitor_id).integers(len(others)))
+        v.exit_goal_group = others[idx]
+        self._start_exiting(v)
+
     def _start_exiting(self, v: Visitor) -> None:
         self._set_state(v, EXITING)
         v.target_booth_id = None
-        if v.position in self.exit_set:
+        goal_set = self._exit_goal_set(v)
+        if v.position in goal_set:
             self._finish(v)
             return
         path = astar(
@@ -683,9 +764,9 @@ class Simulation:
             self.occupancy,
             self.capacity,
             v.position,
-            self.exit_set,
+            goal_set,
             v.congestion_avoidance,
-            self.exit_field,
+            self._exit_heuristic(v),
         )
         v.path = path if path is not None else []
         v.path_index = 0
@@ -810,7 +891,7 @@ class Simulation:
             v.path, v.path_index = [], 0
             return
         if v.state == EXITING:
-            goal_set, hfield = self.exit_set, self.exit_field
+            goal_set, hfield = self._exit_goal_set(v), self._exit_heuristic(v)
         else:
             b = v.target_booth_id
             if self.cfg.booths[b].is_table:
@@ -838,7 +919,7 @@ class Simulation:
 
     def _handle_arrival(self, v: Visitor, t: int) -> None:
         if v.state == EXITING:
-            if v.position in self.exit_set:
+            if v.position in self._exit_goal_set(v):
                 self._finish(v)
             return
         if v.state == WALKING and v.target_booth_id is not None:

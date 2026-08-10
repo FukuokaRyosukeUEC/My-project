@@ -96,6 +96,8 @@ class ProfileSpec:
     max_visit_seconds: float
     distance_weight_factor: float
     interest_mode: str  # uniform / focused / dispersed
+    #: True ならブースに立ち寄らず会場を通り抜けるだけの通行人(駅前広場を想定)。
+    passerby: bool = False
 
 
 @dataclass(frozen=True)
@@ -290,6 +292,7 @@ def load_config(config_dir: str | Path) -> Config:
             max_visit_seconds=float(p["max_visit_seconds"]),
             distance_weight_factor=float(p["distance_weight_factor"]),
             interest_mode=str(p["interest_mode"]),
+            passerby=bool(p.get("passerby", False)),  # 未記載なら通常の来場者
         )
         for p in prof_raw
     )
@@ -441,6 +444,10 @@ class Visitor:
     distance_weight_factor: float
     profile_name: str
     table_after_food_propensity: float = 1.0
+    #: 素通り客(ブースへ行かず別の開口部へ抜ける通行人)。
+    is_passerby: bool = False
+    #: 素通り客が目指す開口部(連結成分)の番号。None なら最寄りの開口部から退出する。
+    exit_goal_group: int | None = None
     state: int = NOT_ARRIVED
     target_booth_id: int | None = None
     path: list = field(default_factory=list)   # list[tuple[int,int]](現在セルは含まない)
