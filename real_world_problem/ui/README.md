@@ -17,7 +17,8 @@
 | 入力: ブースのサイズ・数 | サイドバーのブース表(`st.data_editor`)。行の追加・削除で数を変更 |
 | 入力: エージェント数 | サイドバー「来場者・シミュレーション」→ エージェント数 |
 | 入力: シミュレート時間 | 同上 → シミュレート時間(秒)。到着プロファイルも自動で伸縮 |
-| 入力: 世代数・探索個体数 | サイドバー「最適化(NSGA-II)」 |
+| 入力: 世代数・探索個体数 | サイドバー「最適化(直接配置NSGA-II)」 |
+| 新方式の探索設定 | 完全ランダム初期集団を使用。整然性制約、3段階突然変異、Memetic探索は内部既定値を使用 |
 | 出力: 最適化中の解を選択 | パレート図の点をクリックして選択 |
 | 比較: 実会場で実際に使われた配置 | `booths.yaml` の `fixed_position` を評価し、★ でパレート図に重ねる |
 | 出力: 10 世代ごとに GUI 表示 | スナップショット間隔(既定 10)ごとに集団を保存し、世代スライダで切替 |
@@ -45,7 +46,7 @@ UI とワーカーは共有メモリを持たず、**実行ディレクトリ配
 │                         │          │                              │
 │ サイドバー入力          │  起動 →  │ load_config(run_dir/config)  │
 │   ↓ RunParams           │          │   ↓                          │
-│ build_config_dir()      │  ──────→ │ run_nsga2(on_generation=…)   │
+│ build_config_dir()      │  ──────→ │ run_direct_nsga2(…)          │
 │   → run_dir/config/*.yaml│         │   ↓ 毎世代                    │
 │                         │          │   status.json を更新          │
 │ 2秒ごとポーリング       │ ←──────  │   ↓ N世代ごと                 │
@@ -74,7 +75,7 @@ real_world_problem/runs/<run_id>/       run_id = YYYYMMDD_HHMMSS
 │   ├── gen_0001.json    第 1 世代(初期集団)
 │   ├── gen_0010.json    以降 snapshot_interval ごと
 │   └── ...
-├── results/             既存 save_results と同じ成果物(任意)
+├── results/             パレート解・代表解・直接配置方式のメタデータ(任意)
 ├── ui_cache/            可視化した PNG / GIF のキャッシュ
 └── worker.log           ワーカーの標準出力・標準エラー
 ```
@@ -103,7 +104,7 @@ real_world_problem/runs/<run_id>/       run_id = YYYYMMDD_HHMMSS
 `rank == 0` が非支配解(その世代のパレートフロント)。
 
 設計ベクトル `x` をそのまま持たせているので、UI 側で
-`to_integer_layout(x)` → `apply_layout` → `evaluate_layout` により
+`to_integer_layout(x, cfg)` → `apply_layout` → `evaluate_layout` により
 任意の世代の任意の解をいつでも再現できる。乱数は §2.3.2 の 3 系統分離方式で
 配置に依存しないため、ワーカーでの評価と UI での再評価は完全に一致する。
 
@@ -112,6 +113,8 @@ real_world_problem/runs/<run_id>/       run_id = YYYYMMDD_HHMMSS
 `config/booths.yaml` の各ブースが持つ `fixed_position: [x, y, theta]` は、
 調布市マルシェで実際に使われた配置。ワーカーは**最適化を始める前に**
 これを最適化解と同じ条件で 1 回シミュレーションし、`fixed_layout.json` に残す。
+UIのブース編集表では `fixed_position` を表示せず内部列として保持し、実行用の
+`booths.yaml` へ引き継ぐ。したがって、実会場モードの新規実行でも比較基準が失われない。
 
 ```json
 {
@@ -262,33 +265,36 @@ A → B の順に 2 スロットへ溜める(3 つ目のクリックで古い A 
 
 ブース表の行数がそのままブース数になる。`booth_id` は保存時に 0 起点で
 振り直す(`run_store._normalize_booths`)。設計変数は
-`n_booths × 3`(x, y, θ)なので、行数を変えると探索空間の次元も変わる。
+通常ブースは `(x, y, θ)` の3変数、方向を持たないテーブルは `(x, y)` の2変数。
+したがって行数やテーブル数を変えると探索空間の次元も変わる。
 
 ---
 
-## 5. 既存コードへの変更
+## 5. 使用する最適化方式
 
-`src/optimization.py` に **任意フックを 1 つだけ** 追加した。既定値 `None` で
-従来と挙動は同一、既存の呼び出し側(`scripts/run_optimization.py`)は無変更。
+UIワーカーは `src.direct_optimization.run_direct_nsga2()` を呼び、CLIと同じ
+単一レベル直接配置方式を使用する。
 
-```python
-class ObjectiveHistoryCallback(Callback):
-    def __init__(self, on_generation=None) -> None:   # 追加: on_generation
-        ...
-    def notify(self, algorithm) -> None:
-        ...
-        if self.on_generation is not None:            # 追加: 3 行
-            self.on_generation(algorithm)
+- 初期集団は `prepare_random_feasible_direct_population()` により、固定配置や
+  列テンプレートを使わず、物理制約だけを満たす完全ランダム配置として生成する。
+- 第30世代までは突然変異率を0.90、局所・中規模・大域の選択率を
+  `0.20 / 0.30 / 0.50` とし、以後は `0.70`、`0.55 / 0.30 / 0.15` へ戻す。
+- 大域突然変異は、互いの配置距離を確認した最大32個の整然配置ドナーを使う。
+  プール満杯後も確率的にドナーを更新する。
+- NSGA-IIの環境選択では目的関数のrank/crowdingを優先したうえで、配置距離が
+  0.02未満の近似重複を後回しにする。個体数が不足する場合は後回し個体を戻す。
+- Memetic局所探索は第29世代まで停止し、第30世代以降に指定間隔で実行する。
+- 物理配置制約に加え、列・外周構造、整列誤差、間隔、方向、孤立、正面通路の
+  成分別整然性制約を使う。第1世代の緩和上限から最終上限へ40世代かけて
+  線形に厳しくし、短い実行では最終世代までに必ず最終上限へ到達する。
+  方向と出入口を持たないテーブルには、方向・正面通路の評価を適用しない。
+- 終了時は通常の成果物に加え、`direct_*_designs.csv`、
+  `direct_*_method.json`、`memetic_history.csv`、`mutation_history.csv`、
+  `orderliness_schedule_history.csv`、`layout_diversity_history.csv` を保存する。
 
-def run_nsga2(..., on_generation=None):               # 追加: 引数 1 つ
-    history_callback = ObjectiveHistoryCallback(on_generation=on_generation)
-```
-
-pymoo の `CallbackCollection` は `notify` ではなく `update` しか委譲しないため
-(`pymoo/core/callback.py`)、コールバックを 2 本並べる方法は使えなかった。
-既存の `ObjectiveHistoryCallback` にフックを 1 本生やすのが最小の変更になる。
-
-他は `src/` `scripts/` `tests/` `config/` いずれも変更していない。
+UIの探索設定は `runs/<run_id>/params.json` に保存されるため、評価シードとは別の
+最適化シードも含めて再現できる。初期集団は個体ごとの決定的な乱数系列を使うので、
+並列プロセス数を変えても同じ設定・同じ最適化シードなら同一になる。
 
 ---
 

@@ -33,7 +33,12 @@ try:
 except ImportError:
     from pymoo.core.problem import StarmapParallelization
 
-from src.constraints import compute_violation, design_variable_count, to_integer_layout
+from src.constraints import (
+    compute_violation,
+    design_variable_count,
+    positions_to_design,
+    to_integer_layout,
+)
 from src.models import load_config
 from src.optimization import calculate_hv_history, save_results, select_representatives
 from src.parallel import build_context, default_workers, evaluate_layout, init_worker
@@ -143,7 +148,7 @@ def main() -> None:
     parser.add_argument(
         "--mutation-individual-prob",
         type=float,
-        default=0.70,
+        default=0.20,
         help="子個体に三段階突然変異を適用する確率(既定: 0.70)",
     )
     parser.add_argument(
@@ -165,10 +170,40 @@ def main() -> None:
         help="突然変異対象個体で大域変異を選ぶ確率(既定: 0.15)",
     )
     parser.add_argument(
+        "--exploration-generations",
+        type=int,
+        default=30,
+        help="大域突然変異を50%%へ強化する初期世代数(既定: 30)",
+    )
+    parser.add_argument(
+        "--donor-pool-size",
+        type=int,
+        default=32,
+        help="大域突然変異が保持する多様な整然配置ドナー数(既定: 32)",
+    )
+    parser.add_argument(
+        "--minimum-layout-distance",
+        type=float,
+        default=0.02,
+        help="環境選択で近似重複を後回しにする配置距離(既定: 0.02)",
+    )
+    parser.add_argument(
+        "--orderliness-tightening-generations",
+        type=int,
+        default=40,
+        help="緩和整然性制約から最終上限へ移行する世代数(既定: 40)",
+    )
+    parser.add_argument(
         "--memetic-interval",
         type=int,
         default=5,
         help="非劣解近傍探索の実行間隔(既定: 5世代)",
+    )
+    parser.add_argument(
+        "--memetic-start-generation",
+        type=int,
+        default=30,
+        help="Memetic近傍探索を開始する世代(既定: 30)",
     )
     parser.add_argument(
         "--memetic-parents",
@@ -199,6 +234,16 @@ def main() -> None:
         parser.error("三段階突然変異の3つの重みの合計は1にしてください")
     if not 0.0 <= args.mutation_individual_prob <= 1.0:
         parser.error("--mutation-individual-probは0以上1以下にしてください")
+    if args.exploration_generations < 0:
+        parser.error("--exploration-generationsは0以上にしてください")
+    if args.donor_pool_size < 1:
+        parser.error("--donor-pool-sizeは1以上にしてください")
+    if not 0.0 <= args.minimum_layout_distance <= 1.0:
+        parser.error("--minimum-layout-distanceは0以上1以下にしてください")
+    if args.orderliness_tightening_generations < 1:
+        parser.error("--orderliness-tightening-generationsは1以上にしてください")
+    if args.memetic_start_generation < 1:
+        parser.error("--memetic-start-generationは1以上にしてください")
     if min(args.memetic_interval, args.memetic_parents, args.memetic_neighbors) < 1:
         parser.error("Memeticの間隔・親数・近傍数は1以上にしてください")
     if args.memetic_max_neighbor_trials < args.memetic_neighbors:
@@ -228,7 +273,11 @@ def main() -> None:
         f"({args.mutation_local_weight:.2f}/"
         f"{args.mutation_meso_weight:.2f}/"
         f"{args.mutation_macro_weight:.2f}), "
-        f"memetic={args.memetic_interval}世代ごと×"
+        f"exploration=1-{args.exploration_generations}世代は0.90×(0.20/0.30/0.50), "
+        f"donors={args.donor_pool_size}, diversity={args.minimum_layout_distance:.3f}, "
+        f"orderliness_tightening={args.orderliness_tightening_generations}世代, "
+        f"memetic={args.memetic_start_generation}世代以降"
+        f"{args.memetic_interval}世代ごと×"
         f"{args.memetic_parents}非劣解×{args.memetic_neighbors}近傍"
     )
 
@@ -253,7 +302,14 @@ def main() -> None:
             mutation_local_weight=args.mutation_local_weight,
             mutation_meso_weight=args.mutation_meso_weight,
             mutation_macro_weight=args.mutation_macro_weight,
+            exploration_generations=args.exploration_generations,
+            donor_pool_size=args.donor_pool_size,
+            minimum_layout_distance=args.minimum_layout_distance,
+            orderliness_tightening_generations=(
+                args.orderliness_tightening_generations
+            ),
             memetic_interval=args.memetic_interval,
+            memetic_start_generation=args.memetic_start_generation,
             memetic_parents=args.memetic_parents,
             memetic_neighbors=args.memetic_neighbors,
             memetic_max_neighbor_trials=args.memetic_max_neighbor_trials,
@@ -363,7 +419,7 @@ def main() -> None:
         raise ValueError(f"booths.yamlの比較用固定配置が制約違反です: g={fixed_violation}")
     fixed_orderliness = compute_direct_orderliness(
         cfg,
-        np.asarray(fixed_positions).reshape(-1),
+        positions_to_design(cfg, fixed_positions),
         limits=result.orderliness_limits,
     )
     if float(fixed_orderliness["total"]) > 1.0:

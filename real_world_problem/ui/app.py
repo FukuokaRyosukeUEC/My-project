@@ -210,6 +210,12 @@ def sidebar_inputs() -> run_store.RunParams:
                 "kind": b.get("kind", "booth"),
                 "theme": b.get("theme", "normal"),
                 "area": b.get("area", ""),
+                # 既存配置は編集対象にせず、非表示内部列として保持する。
+                run_store.EDITOR_FIXED_POSITION_FIELD: (
+                    ",".join(str(int(v)) for v in b["fixed_position"])
+                    if b.get("fixed_position")
+                    else ""
+                ),
             }
             for i, b in enumerate(preset_booths)
         ]
@@ -221,6 +227,11 @@ def sidebar_inputs() -> run_store.RunParams:
         width="stretch",
         height=260,
         key=f"booths_{venue_mode}",
+        column_order=[
+            column
+            for column in booth_df.columns
+            if column != run_store.EDITOR_FIXED_POSITION_FIELD
+        ],
         column_config={
             "width": st.column_config.NumberColumn("幅", min_value=1, step=1),
             "height": st.column_config.NumberColumn("奥行", min_value=1, step=1),
@@ -256,7 +267,11 @@ def sidebar_inputs() -> run_store.RunParams:
         )
 
     # --- 最適化
-    with st.sidebar.expander("最適化(NSGA-II)", expanded=True):
+    with st.sidebar.expander("最適化(直接配置NSGA-II)", expanded=True):
+        st.caption(
+            "通常ブース=(x, y, 方向)、テーブル=(x, y)の直接表現で探索します。"
+            "初期集団は固定配置や整列テンプレートを使わず、完全ランダムに生成します。"
+        )
         pop = st.number_input(
             "探索個体数", min_value=4, max_value=1000,
             value=16, step=4,
@@ -273,8 +288,17 @@ def sidebar_inputs() -> run_store.RunParams:
         workers = st.number_input(
             "並列プロセス数", min_value=1, max_value=64, value=4, step=1
         )
+        optimization_seed = st.number_input(
+            "最適化シード", min_value=0, value=1, step=1,
+            help="交叉・突然変異と完全ランダム初期集団の再現に使います。",
+        )
+        initial_max_trials = st.number_input(
+            "初期個体の最大試行回数", min_value=1, max_value=100000,
+            value=5000, step=500,
+            help="物理制約を満たすランダム配置が作れない場合は増やしてください。",
+        )
         save_artifacts = st.checkbox(
-            "終了後に成果物(CSV・代表解 JSON)を書き出す", value=True
+            "終了後に成果物(CSV・代表解・方式情報)を書き出す", value=True
         )
 
     return run_store.RunParams(
@@ -285,7 +309,9 @@ def sidebar_inputs() -> run_store.RunParams:
         entrance_side=entrance_side,
         exit_side=exit_side,
         entrance_exit_span=int(span),
-        booths=edited.to_dict(orient="records"),
+        booths=run_store.restore_editor_fixed_positions(
+            edited.to_dict(orient="records"), venue_mode
+        ),
         n_visitors=int(n_visitors),
         duration_seconds=float(duration),
         dt_seconds=float(dt),
@@ -295,6 +321,8 @@ def sidebar_inputs() -> run_store.RunParams:
         n_generations=int(gen),
         workers=int(workers),
         snapshot_interval=int(interval),
+        optimization_seed=int(optimization_seed),
+        initial_max_trials=int(initial_max_trials),
         save_artifacts=bool(save_artifacts),
     )
 
@@ -304,6 +332,7 @@ def sidebar_inputs() -> run_store.RunParams:
 
 def start_run(params: run_store.RunParams) -> str:
     """config を書き出してワーカーを起動し、run_id を返す。"""
+    params.validate()
     run_id = run_store.new_run_id()
     rd = run_store.run_dir(run_id)
     rd.mkdir(parents=True, exist_ok=True)
@@ -336,6 +365,7 @@ def progress_panel(run_id: str) -> None:
     label = {
         "starting": "起動中",
         "baseline": "実会場配置を評価中",
+        "initializing": "完全ランダム初期集団を生成中",
         "running": "最適化中",
         "finalizing": "成果物を出力中",
         "done": "完了",

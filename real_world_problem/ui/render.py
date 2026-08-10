@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from src.constraints import to_integer_layout  # noqa: E402
+from src.constraints import design_variable_count, to_integer_layout  # noqa: E402
 from src.models import Config  # noqa: E402
 from src.parallel import StaticContext, build_context, evaluate_layout  # noqa: E402
 from src.venue import apply_layout  # noqa: E402
@@ -42,12 +42,35 @@ def design_key(x) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
 
 
+def decode_positions(cfg: Config, x) -> tuple[tuple[int, int, int], ...]:
+    """新120変数と保存済み旧3変数/配置物の両方を内部配置へ戻す。
+
+    現行形式は通常ブース ``(x,y,theta)``、テーブル ``(x,y)`` なので、
+    必ず cfg を渡して復元する。旧UIが保存した比較基準だけは全配置物を
+    ``(x,y,theta)`` としたベクトルのため、履歴表示用に後方互換対応する。
+    """
+    values = tuple(x)
+    if len(values) == design_variable_count(cfg):
+        return to_integer_layout(values, cfg)
+    if len(values) == len(cfg.booths) * 3:
+        positions = to_integer_layout(values)
+        return tuple(
+            (int(px), int(py), 0 if booth.is_table else int(theta))
+            for booth, (px, py, theta) in zip(cfg.booths, positions)
+        )
+    raise ValueError(
+        "unsupported design vector length for visualization: "
+        f"expected {design_variable_count(cfg)} (current) or "
+        f"{len(cfg.booths) * 3} (legacy), got {len(values)}"
+    )
+
+
 # ---------------------------------------------------------------- レイアウト図
 
 
 def render_layout(cfg: Config, ctx: StaticContext, x, path: Path) -> Path:
     """会場レイアウト図(ブース・受付・退出・待機列)を PNG で保存する。"""
-    positions = to_integer_layout(x)
+    positions = decode_positions(cfg, x)
     layout = apply_layout(cfg, ctx.venue, positions)
 
     fig, ax = plt.subplots(figsize=(9, 9 * cfg.grid_height / max(cfg.grid_width, 1)))
@@ -68,7 +91,7 @@ def render_heatmap(cfg: Config, ctx: StaticContext, x, path: Path) -> tuple[Path
 
     戻り値は (画像パス, KPI dict)。
     """
-    positions = to_integer_layout(x)
+    positions = decode_positions(cfg, x)
     result = evaluate_layout(ctx, positions, collect_heatmap=True)
     layout = apply_layout(cfg, ctx.venue, positions)
 
@@ -100,7 +123,7 @@ def simulate_series(cfg: Config, ctx: StaticContext, x) -> dict:
 
     time_seconds はステップ番号に cfg.dt_seconds を掛けた実時間(秒)。
     """
-    positions = to_integer_layout(x)
+    positions = decode_positions(cfg, x)
     result = evaluate_layout(ctx, positions)
 
     steps = list(result.time_steps)
@@ -149,7 +172,7 @@ def render_agent_animation(
 
     frame_interval を大きくするほどフレーム数が減り、生成が速くなる。
     """
-    positions = to_integer_layout(x)
+    positions = decode_positions(cfg, x)
     result = evaluate_layout(
         ctx,
         positions,
