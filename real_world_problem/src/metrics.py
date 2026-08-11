@@ -40,11 +40,66 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
 
     # --- 目的関数 1: 移動負担(自由歩行換算時間, §12.1)
     if n_spawned:
-        walk_secs = np.array([free_walk_seconds(v, cfg) for v in spawned])
-        f_move = float(walk_secs.mean())
+        walk_secs = np.array(
+           [free_walk_seconds(v, cfg) for v in spawned],
+            dtype=float,
+        )
+        n_exp_for_move = np.array(
+            [len(v.visited_booths) for v in spawned],
+            dtype=float,
+        )
+
+    # 0除算防止。体験0人は denominator=1 として扱う
+        denom_exp = np.maximum(1.0, n_exp_for_move)
+
+        walk_per_experience = walk_secs / denom_exp
+
+    # 目的関数
+        f_move = float(walk_per_experience.mean())
     else:
-        walk_secs = np.array([])
-        f_move = 0.0
+       walk_secs = np.array([])
+       f_move = 0.0
+# --- 目的関数 1: 1体験あたり移動負担 + 少量の総歩行時間
+    if n_spawned:
+       walk_secs = np.array(
+           [free_walk_seconds(v, cfg) for v in spawned],
+           dtype=float,
+       )
+
+       n_exp_for_move = np.array(
+           [len(v.visited_booths) for v in spawned],
+           dtype=float,
+        )
+
+    # 0除算防止。体験0人は denominator=1 として扱う
+       denom_exp = np.maximum(1.0, n_exp_for_move)
+
+    # 1体験あたりの移動負担
+       walk_per_experience = walk_secs / denom_exp
+
+       mean_free_walk_seconds = float(walk_secs.mean())
+       mean_move_seconds_per_experience = float(walk_per_experience.mean())
+       p90_move_seconds_per_experience = float(
+        np.percentile(walk_per_experience, 90)
+    )
+    # 総歩行時間を少しだけ反映する重み
+       total_walk_weight = 0.15
+       tail_weight = 0.20
+    # 目的関数
+       f_move_core = float(
+           (1.0- tail_weight)*mean_move_seconds_per_experience
+          + tail_weight * p90_move_seconds_per_experience
+       )
+       f_move = float(
+        f_move_core
+        + total_walk_weight * mean_free_walk_seconds
+    )
+    else:
+       walk_secs = np.array([])
+       mean_free_walk_seconds = 0.0
+       mean_move_seconds_per_experience = 0.0
+       p90_move_seconds_per_experience = 0.0
+       f_move = 0.0
 
     # --- 補助 KPI 用の配列
     q = np.array([v.queue_seconds for v in spawned]) if n_spawned else np.array([0.0])
