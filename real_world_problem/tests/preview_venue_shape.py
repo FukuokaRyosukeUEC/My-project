@@ -31,6 +31,7 @@ from src.venue import apply_layout, build_base_venue, oriented_booth_size  # noq
 from src.visualization import (  # noqa: E402
     _FRONT_MARKERS,
     _OPPOSITE_THETA,
+    _draw_table_icon,
     booth_style_map,
 )
 
@@ -81,18 +82,23 @@ def _draw_fixed_booths(ax, cfg) -> list[tuple[str, str]]:
 
         key = (spec.kind, "normal" if spec.is_table else spec.theme)
         face = style_map.get(key, style_map[("booth", "normal")])[0]
-        if key not in used_attrs:
-            used_attrs.append(key)
-        ax.add_patch(
-            Rectangle(
-                (bx - 0.5, by - 0.5),
-                width,
-                height,
-                facecolor=face,
-                edgecolor="black",
-                linewidth=0.8,
-            )
+        # テーブル・椅子は fig/table.png のアイコンだけで示す(src/visualization.py と統一)。
+        drawn_as_icon = spec.is_table and _draw_table_icon(
+            ax, bx - 0.5, by - 0.5, width, height, zorder=2
         )
+        if not drawn_as_icon:
+            if key not in used_attrs:
+                used_attrs.append(key)
+            ax.add_patch(
+                Rectangle(
+                    (bx - 0.5, by - 0.5),
+                    width,
+                    height,
+                    facecolor=face,
+                    edgecolor="black",
+                    linewidth=0.8,
+                )
+            )
         if not spec.is_table:
             ax.text(
                 bx + width / 2 - 0.5,

@@ -30,6 +30,11 @@ from src.visualization import (  # noqa: E402
 #: 図が意味をなさないため十分に長くとる。
 VIZ_TIMEOUT_SECONDS = 3600.0
 
+#: 描画の版。`ui_cache/` のファイル名に混ぜてキャッシュを世代管理する。
+#: src/visualization.py の見た目を変えたら +1 する(古い画像の再利用を防ぐ)。
+#: 2: テーブル・椅子を灰色の矩形から fig/table.png のアイコンに変更。
+RENDER_VERSION = 2
+
 
 def viz_context(cfg: Config) -> StaticContext:
     """可視化専用の静的コンテキスト(タイムアウトのみ緩める)。"""

@@ -1,6 +1,7 @@
 """visualization.py — 最適化終了後の可視化(§20)。最適化中は使用しない(§17.1)。"""
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import matplotlib
@@ -80,6 +81,56 @@ _CELL_FACE = {
     EXIT: "#f4a9a8",
     FORBIDDEN: "#e6e6e6",
 }
+
+#: テーブル・椅子(kind: table)の区画に重ねるアイコン。無ければ矩形のみで描く。
+_TABLE_ICON_PATH = Path(__file__).resolve().parents[1] / "fig" / "table.png"
+#: 区画に内接する大きさに対する倍率(1.0 で区画ぴったり)。見やすさ優先で拡大する。
+_TABLE_ICON_SCALE = 1.5
+
+
+@lru_cache(maxsize=1)
+def _table_icon():
+    """テーブルアイコンを透明余白なしの RGBA 配列で返す(読めなければ None)。"""
+    try:
+        from PIL import Image
+
+        img = np.asarray(Image.open(_TABLE_ICON_PATH).convert("RGBA"))
+    except Exception:  # pragma: no cover (画像が無い配布物でも描画は継続する)
+        return None
+    ys, xs = np.nonzero(img[..., 3])
+    if ys.size == 0:
+        return None
+    return img[ys.min(): ys.max() + 1, xs.min(): xs.max() + 1]
+
+
+def _draw_table_icon(ax, x0: float, y0: float, width: float, height: float, zorder=None) -> bool:
+    """テーブル区画 (x0, y0)-(x0+width, y0+height) の中央へ縦横比を保って描く。
+
+    大きさは区画に内接するサイズの _TABLE_ICON_SCALE 倍。1.0 より大きいと
+    区画からはみ出すが、占有セル自体はシミュレーション側で決まるため描画のみの拡大。
+    """
+    icon = _table_icon()
+    if icon is None:
+        return False
+    icon_h, icon_w = icon.shape[:2]
+    scale = min(width / icon_w, height / icon_h) * _TABLE_ICON_SCALE
+    w, h = icon_w * scale, icon_h * scale
+    cx, cy = x0 + width / 2.0, y0 + height / 2.0
+    kwargs = {} if zorder is None else {"zorder": zorder}
+    # imshow は autoscale が有効な軸では表示範囲をアイコンの extent で上書きしてしまう。
+    # 呼び出し側の表示範囲を保つため、描画前の範囲を控えて戻す。
+    xlim, ylim = ax.get_xlim(), ax.get_ylim()
+    # extent=(左, 右, 下, 上)。y は下へ増加する(§3.5)ので上端が小さい値になる。
+    ax.imshow(
+        icon,
+        extent=(cx - w / 2.0, cx + w / 2.0, cy + h / 2.0, cy - h / 2.0),
+        interpolation="antialiased",
+        **kwargs,
+    )
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    return True
+
 
 #: (kind, "normal") の既定塗り色・ラベル。theme が normal 以外のブースは
 #: booth_style_map() が booths.yaml の登場順にパレットから都度自動割当する
@@ -161,22 +212,29 @@ def draw_venue(ax, cfg: Config, layout: Layout, legend: bool = False) -> None:
             else spec.theme,
         )
 
-        if key not in used_attrs:
-            used_attrs.append(key)
-
-        ax.add_patch(
-            Rectangle(
-                (
-                    bx - 0.5,
-                    by - 0.5,
-                ),
-                width,
-                height,
-                facecolor=face,
-                edgecolor="black",
-                linewidth=1.2,
-            )
+        # テーブル・椅子はアイコン(fig/table.png)だけで示し、矩形も凡例も出さない。
+        # アイコンを読めなかったときだけ従来どおり矩形で描く。
+        drawn_as_icon = spec.is_table and _draw_table_icon(
+            ax, bx - 0.5, by - 0.5, width, height, zorder=2
         )
+
+        if not drawn_as_icon:
+            if key not in used_attrs:
+                used_attrs.append(key)
+
+            ax.add_patch(
+                Rectangle(
+                    (
+                        bx - 0.5,
+                        by - 0.5,
+                    ),
+                    width,
+                    height,
+                    facecolor=face,
+                    edgecolor="black",
+                    linewidth=1.2,
+                )
+            )
 
         if not spec.is_table:
             ax.text(
@@ -581,7 +639,10 @@ def plot_heatmaps(cfg: Config, layout: Layout, heatmap, over_map, path: str | Pa
         fig.colorbar(im, ax=ax, fraction=0.04)
     style_map = booth_style_map(cfg)
     used_attrs = []
+    has_table_icon = _table_icon() is not None
     for spec in cfg.booths:
+        if spec.is_table and has_table_icon:
+            continue  # アイコンで描くため色の凡例は出さない
         key = (spec.kind, "normal" if spec.is_table else spec.theme)
         if key not in used_attrs:
             used_attrs.append(key)
@@ -653,21 +714,27 @@ def draw_venue_outline(
             theta,
         )
 
-        ax.add_patch(
-            Rectangle(
-                (
-                    bx - 0.5,
-                    by - 0.5,
-                ),
-                width,
-                height,
-                fill=True,
-                facecolor=_booth_face(spec, style_map),
-                edgecolor="black",
-                linewidth=1.0,
-                zorder=4,
-            )
+        # draw_venue と同じく、テーブル・椅子はアイコンだけで示す。
+        drawn_as_icon = spec.is_table and _draw_table_icon(
+            ax, bx - 0.5, by - 0.5, width, height, zorder=5
         )
+
+        if not drawn_as_icon:
+            ax.add_patch(
+                Rectangle(
+                    (
+                        bx - 0.5,
+                        by - 0.5,
+                    ),
+                    width,
+                    height,
+                    fill=True,
+                    facecolor=_booth_face(spec, style_map),
+                    edgecolor="black",
+                    linewidth=1.0,
+                    zorder=4,
+                )
+            )
 
         if not spec.is_table:
             ax.text(
@@ -784,7 +851,7 @@ def render_animation(cfg: Config, layout: Layout, frames, path: str | Path, fps:
     )
     fig.set_size_inches(fig_width, fig_height_in)
     adjust_margins(fig_width)
-    scat = ax.scatter([], [], s=18)
+    scat = ax.scatter([], [], s=18, zorder=3)  # テーブルアイコン(zorder=2)より前面
     label = ax.text(0.01, 0.99, "", transform=ax.transAxes, va="top", fontsize=9)
     legend_handles = [
         Line2D([0], [0], marker="o", linestyle="none", color=STATE_COLORS[WALKING],
