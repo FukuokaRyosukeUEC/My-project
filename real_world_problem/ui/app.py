@@ -62,7 +62,7 @@ def get_viz_context(config_dir: str):
 def cached_layout_png(config_dir: str, x: tuple, out_dir: str) -> str:
     cfg = get_config(config_dir)
     ctx = get_viz_context(config_dir)
-    path = Path(out_dir) / f"layout_{render.design_key(x)}.png"
+    path = Path(out_dir) / f"layout_{render.design_key(x)}_v{render.RENDER_VERSION}.png"
     if not path.exists():
         render.render_layout(cfg, ctx, x, path)
     return str(path)
@@ -72,7 +72,7 @@ def cached_layout_png(config_dir: str, x: tuple, out_dir: str) -> str:
 def cached_heatmap_png(config_dir: str, x: tuple, out_dir: str) -> tuple[str, dict]:
     cfg = get_config(config_dir)
     ctx = get_viz_context(config_dir)
-    path = Path(out_dir) / f"heatmap_{render.design_key(x)}.png"
+    path = Path(out_dir) / f"heatmap_{render.design_key(x)}_v{render.RENDER_VERSION}.png"
     _, kpis = render.render_heatmap(cfg, ctx, x, path)
     return str(path), kpis
 
@@ -128,7 +128,7 @@ def cached_animation_gif(
     ctx = get_viz_context(config_dir)
     path = (
         Path(out_dir)
-        / f"anim_{render.design_key(x)}_i{frame_interval}_f{fps}.gif"
+        / f"anim_{render.design_key(x)}_i{frame_interval}_f{fps}_v{render.RENDER_VERSION}.gif"
     )
     if not path.exists():
         render.render_agent_animation(
