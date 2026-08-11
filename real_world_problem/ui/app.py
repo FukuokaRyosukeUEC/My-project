@@ -4,11 +4,12 @@
     cd real_world_problem
     streamlit run ui/app.py
 
-画面は 3 段構成。
-  サイドバー : 入力(会場・ブース・エージェント・時間・世代数・個体数)
-  上段       : 進捗(2 秒ごとに自動更新)
-  下段       : 世代スライダ + パレート図(クリックで解を選択)
-               → 選択解のレイアウト図 / ヒートマップ / アニメーション
+画面は 2 ページ構成(上部のタブで切り替え)。
+  ① パラメータ入力 : 会場・ブース・エージェント・時間・世代数・個体数
+  ② 結果表示       : 進捗 → 世代スライダ
+                     → 左: パレート図 / 右: 選択解のレイアウト図・
+                       ヒートマップ・アニメーション(高さ上限つき)
+                     → そのすぐ下に 2 解の比較
 
 最適化そのものは ui/optimize_worker.py が別プロセスで回す。
 この画面はファイル(runs/<run_id>/)を読むだけなので、
@@ -16,6 +17,7 @@
 """
 from __future__ import annotations
 
+import base64
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +44,61 @@ POLL_SECONDS = 2.0
 #: スナップショット内の解と区別するための擬似インデックス。
 BASELINE_INDEX = -1
 BASELINE_COLOR = "#2ca02c"
+
+#: 画面(タブ)の識別子。session_state["page"] に入る。
+PAGE_INPUT = "① パラメータ入力"
+PAGE_RESULT = "② 結果表示"
+
+#: パレート図の軸まわりに確保する余白[px]。
+#: 描画領域(軸の内側)を正方形にするため、図全体のサイズは
+#: 「一辺 + この余白」で決める。
+PARETO_MARGIN = dict(l=75, r=25, t=45, b=70)
+
+
+def pareto_square_layout(plot_size: int) -> dict:
+    """描画領域を plot_size×plot_size の正方形にするレイアウト。
+
+    正方形にするのはアスペクト比だけで、大きさは「図の大きさ」
+    スライダ(= 会場図の高さ上限)に追従して変わる。
+    図タイトルは持たせない(上余白を食って正方形が崩れるため)。
+    世代と解数は見出し下の caption に出している。
+    """
+    return dict(
+        width=plot_size + PARETO_MARGIN["l"] + PARETO_MARGIN["r"],
+        height=plot_size + PARETO_MARGIN["t"] + PARETO_MARGIN["b"],
+        autosize=False,
+        margin=PARETO_MARGIN,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+    )
+
+
+#: 図の大きさ[px]の既定値。会場図は高さの上限、パレート図は一辺になる。
+#: 実会場ポリゴンは縦長なので、幅いっぱいに伸ばすと
+#: パレート図に対して極端に縦長になってしまう。
+FIGURE_MAX_HEIGHT = 480
+FIGURE_HEIGHT_OPTIONS = [
+    360, 420, 480, 540, 600, 720, 900, 1080, 1280, 1600, 2000,
+]
+
+
+def show_figure(path: str, max_height: int = FIGURE_MAX_HEIGHT) -> None:
+    """画像を「高さ上限つき・アスペクト比保持」で中央に表示する。
+
+    st.image(width="stretch") は幅を列いっぱいに広げるため、
+    縦長の実会場レイアウトだと画面を占有してしまう。
+    高さで頭打ちにしたいので img タグを直接置いている。
+    """
+    data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    suffix = Path(path).suffix.lower()
+    mime = "image/gif" if suffix == ".gif" else "image/png"
+    st.markdown(
+        f'<div style="text-align:center">'
+        f'<img src="data:{mime};base64,{data}" '
+        f'style="max-width:100%;max-height:{max_height}px;'
+        f'width:auto;height:auto;object-fit:contain" />'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ================================================================ キャッシュ
@@ -137,19 +194,19 @@ def cached_animation_gif(
     return str(path)
 
 
-# ================================================================ サイドバー(入力)
+# ================================================================ ① パラメータ入力
 
 
-def sidebar_inputs() -> run_store.RunParams:
-    st.sidebar.header("入力パラメータ")
-
-    venue_mode = st.sidebar.radio(
+def input_panel() -> run_store.RunParams:
+    """パラメータ入力ページ。入力値をまとめた RunParams を返す。"""
+    venue_mode = st.radio(
         "会場モード",
         options=["rect", "real"],
         format_func=lambda v: {
             "rect": "矩形会場(サイズを自由に指定)",
             "real": "実会場(config/ のポリゴン形状)",
         }[v],
+        horizontal=True,
         help=(
             "実会場モードでは会場形状が多角形で定義されているため、"
             "会場サイズは編集できません(config/default_config.yaml の "
@@ -160,41 +217,48 @@ def sidebar_inputs() -> run_store.RunParams:
     preset_main, preset_booths, _ = run_store.load_preset_yaml(venue_mode)
 
     # --- 会場
-    with st.sidebar.expander("会場", expanded=True):
-        if venue_mode == "rect":
-            grid_width = st.number_input(
-                "会場の幅(セル)", min_value=5, max_value=200,
-                value=int(preset_main["grid"]["width"]), step=1,
-            )
-            grid_height = st.number_input(
-                "会場の高さ(セル)", min_value=5, max_value=200,
-                value=int(preset_main["grid"]["height"]), step=1,
-            )
-            entrance_side = st.selectbox(
-                "入口の辺", ["bottom", "top", "left", "right"], index=0
-            )
-            exit_side = st.selectbox(
-                "出口の辺", ["top", "bottom", "left", "right"], index=0
-            )
-            span = st.number_input(
-                "入退場口の幅(セル)", min_value=1, max_value=20, value=2, step=1
-            )
-        else:
-            grid_width = int(preset_main["grid"]["width"])
-            grid_height = int(preset_main["grid"]["height"])
-            entrance_side, exit_side, span = "bottom", "top", 2
-            st.caption(
-                f"会場サイズ: {grid_width} × {grid_height} セル(実会場ポリゴン、編集不可)"
-            )
-
-        cell_size = st.number_input(
+    st.subheader("会場")
+    if venue_mode == "rect":
+        c1, c2, c3 = st.columns(3)
+        grid_width = c1.number_input(
+            "会場の幅(セル)", min_value=5, max_value=200,
+            value=int(preset_main["grid"]["width"]), step=1,
+        )
+        grid_height = c2.number_input(
+            "会場の高さ(セル)", min_value=5, max_value=200,
+            value=int(preset_main["grid"]["height"]), step=1,
+        )
+        cell_size = c3.number_input(
+            "1 セルの大きさ(m)", min_value=0.25, max_value=5.0,
+            value=float(preset_main["grid"]["cell_size_meters"]), step=0.25,
+        )
+        c4, c5, c6 = st.columns(3)
+        entrance_side = c4.selectbox(
+            "入口の辺", ["bottom", "top", "left", "right"], index=0
+        )
+        exit_side = c5.selectbox(
+            "出口の辺", ["top", "bottom", "left", "right"], index=0
+        )
+        span = c6.number_input(
+            "入退場口の幅(セル)", min_value=1, max_value=20, value=2, step=1
+        )
+    else:
+        grid_width = int(preset_main["grid"]["width"])
+        grid_height = int(preset_main["grid"]["height"])
+        entrance_side, exit_side, span = "bottom", "top", 2
+        c1, c2 = st.columns([2, 1])
+        c1.info(
+            f"会場サイズ: {grid_width} × {grid_height} セル"
+            "(実会場ポリゴン、編集不可)"
+        )
+        cell_size = c2.number_input(
             "1 セルの大きさ(m)", min_value=0.25, max_value=5.0,
             value=float(preset_main["grid"]["cell_size_meters"]), step=0.25,
         )
 
     # --- ブース
-    st.sidebar.subheader("ブース")
-    st.sidebar.caption("行の追加・削除でブース数を変えられます。")
+    st.subheader("ブース")
+    st.caption("行の追加・削除でブース数を変えられます。")
 
     booth_df = pd.DataFrame(
         [
@@ -221,11 +285,11 @@ def sidebar_inputs() -> run_store.RunParams:
         ]
     )
 
-    edited = st.sidebar.data_editor(
+    edited = st.data_editor(
         booth_df,
         num_rows="dynamic",
         width="stretch",
-        height=260,
+        height=320,
         key=f"booths_{venue_mode}",
         column_order=[
             column
@@ -243,63 +307,67 @@ def sidebar_inputs() -> run_store.RunParams:
             ),
         },
     )
-    st.sidebar.caption(f"ブース数: {len(edited)}")
+    st.caption(f"ブース数: {len(edited)}")
 
     # --- 来場者・時間
-    with st.sidebar.expander("来場者・シミュレーション", expanded=True):
-        n_visitors = st.number_input(
-            "エージェント数", min_value=1, max_value=100000,
-            value=int(preset_main["simulation"]["n_visitors"]), step=10,
-        )
-        duration = st.number_input(
-            "シミュレート時間(秒)", min_value=10, max_value=100000,
-            value=int(preset_main["time"]["duration_seconds"]), step=10,
-        )
-        dt = st.number_input(
-            "時間刻み dt(秒)", min_value=0.1, max_value=10.0,
-            value=float(preset_main["time"]["dt_seconds"]), step=0.1,
-        )
-        seed = st.number_input("評価シード", min_value=0, value=0, step=1)
-        timeout = st.number_input(
-            "1 評価のタイムアウト(秒)", min_value=1.0, max_value=3600.0,
-            value=30.0, step=5.0,
-            help="1 配置のシミュレーションがこの時間を超えると打ち切り、ペナルティ値になります。",
-        )
+    st.subheader("来場者・シミュレーション")
+    c1, c2, c3 = st.columns(3)
+    n_visitors = c1.number_input(
+        "エージェント数", min_value=1, max_value=100000,
+        value=int(preset_main["simulation"]["n_visitors"]), step=10,
+    )
+    duration = c2.number_input(
+        "シミュレート時間(秒)", min_value=10, max_value=100000,
+        value=int(preset_main["time"]["duration_seconds"]), step=10,
+    )
+    dt = c3.number_input(
+        "時間刻み dt(秒)", min_value=0.1, max_value=10.0,
+        value=float(preset_main["time"]["dt_seconds"]), step=0.1,
+    )
+    c4, c5, _ = st.columns(3)
+    seed = c4.number_input("評価シード", min_value=0, value=0, step=1)
+    timeout = c5.number_input(
+        "1 評価のタイムアウト(秒)", min_value=1.0, max_value=3600.0,
+        value=30.0, step=5.0,
+        help="1 配置のシミュレーションがこの時間を超えると打ち切り、ペナルティ値になります。",
+    )
 
     # --- 最適化
-    with st.sidebar.expander("最適化(直接配置NSGA-II)", expanded=True):
-        st.caption(
-            "通常ブース=(x, y, 方向)、テーブル=(x, y)の直接表現で探索します。"
-            "初期集団は固定配置や整列テンプレートを使わず、完全ランダムに生成します。"
-        )
-        pop = st.number_input(
-            "探索個体数", min_value=4, max_value=1000,
-            value=16, step=4,
-        )
-        gen = st.number_input(
-            "世代数", min_value=1, max_value=2000,
-            value=20, step=5,
-        )
-        interval = st.number_input(
-            "スナップショット間隔(世代)", min_value=1, max_value=100,
-            value=10, step=1,
-            help="この世代数ごとに集団を保存し、GUI で表示できるようにします。",
-        )
-        workers = st.number_input(
-            "並列プロセス数", min_value=1, max_value=64, value=4, step=1
-        )
-        optimization_seed = st.number_input(
-            "最適化シード", min_value=0, value=1, step=1,
-            help="交叉・突然変異と完全ランダム初期集団の再現に使います。",
-        )
-        initial_max_trials = st.number_input(
-            "初期個体の最大試行回数", min_value=1, max_value=100000,
-            value=5000, step=500,
-            help="物理制約を満たすランダム配置が作れない場合は増やしてください。",
-        )
-        save_artifacts = st.checkbox(
-            "終了後に成果物(CSV・代表解・方式情報)を書き出す", value=True
-        )
+    st.subheader("最適化(直接配置 NSGA-II)")
+    st.caption(
+        "通常ブース=(x, y, 方向)、テーブル=(x, y)の直接表現で探索します。"
+        "初期集団は固定配置や整列テンプレートを使わず、完全ランダムに生成します。"
+    )
+    c1, c2, c3 = st.columns(3)
+    pop = c1.number_input(
+        "探索個体数", min_value=4, max_value=1000,
+        value=16, step=4,
+    )
+    gen = c2.number_input(
+        "世代数", min_value=1, max_value=2000,
+        value=20, step=5,
+    )
+    interval = c3.number_input(
+        "スナップショット間隔(世代)", min_value=1, max_value=100,
+        value=10, step=1,
+        help="この世代数ごとに集団を保存し、GUI で表示できるようにします。",
+    )
+    c4, c5, c6 = st.columns(3)
+    workers = c4.number_input(
+        "並列プロセス数", min_value=1, max_value=64, value=4, step=1
+    )
+    optimization_seed = c5.number_input(
+        "最適化シード", min_value=0, value=1, step=1,
+        help="交叉・突然変異と完全ランダム初期集団の再現に使います。",
+    )
+    initial_max_trials = c6.number_input(
+        "初期個体の最大試行回数", min_value=1, max_value=100000,
+        value=5000, step=500,
+        help="物理制約を満たすランダム配置が作れない場合は増やしてください。",
+    )
+    save_artifacts = st.checkbox(
+        "終了後に成果物(CSV・代表解・方式情報)を書き出す", value=True
+    )
 
     return run_store.RunParams(
         venue_mode=venue_mode,
@@ -395,13 +463,16 @@ def pareto_figure(
     snapshot: dict,
     slots: list[dict] | None = None,
     baseline: dict | None = None,
+    plot_size: int = FIGURE_MAX_HEIGHT,
 ) -> go.Figure:
     rows = snapshot["solutions"]
     df = pd.DataFrame(rows)
+    square = pareto_square_layout(plot_size)
 
     fig = go.Figure()
     if df.empty and baseline is None:
         fig.add_annotation(text="実行可能解がありません", showarrow=False)
+        fig.update_layout(**square)
         return fig
 
     # A/B は「点の上に別トレースを重ねる」のではなく、
@@ -472,9 +543,7 @@ def pareto_figure(
         fig.update_layout(
             xaxis_title="f_move(移動負担: 自由歩行換算時間 [秒])",
             yaxis_title="f_congestion(混雑度)",
-            height=460,
-            margin=dict(l=10, r=10, t=40, b=10),
-            title="この世代には実行可能解がありません(比較基準のみ表示)",
+            **square,
         )
         return fig
 
@@ -508,13 +577,10 @@ def pareto_figure(
     fig.update_layout(
         xaxis_title="f_move(移動負担: 自由歩行換算時間 [秒])",
         yaxis_title="f_congestion(混雑度)",
-        height=460,
-        margin=dict(l=10, r=10, t=40, b=10),
-        title=f"第 {snapshot['generation']} 世代の集団({len(df)} 解)",
         clickmode="event+select",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         # dragmode は既定の "zoom" のまま。"select" にすると単純クリックが
         # 空の矩形選択として扱われ、点のクリック選択が効かなくなる。
+        **square,
     )
     return fig
 
@@ -578,12 +644,9 @@ def solution_name(sol: dict) -> str:
 
 
 def slot_label(sol: dict) -> str:
-    tail = (
-        "比較基準" if is_baseline(sol) else f"rank {sol['rank']}"
-    )
     return (
         f"{solution_name(sol)}  f_move={sol['f_move']:.1f} / "
-        f"f_cong={sol['f_congestion']:.4g} / {tail}"
+        f"f_cong={sol['f_congestion']:.4g}"
     )
 
 
@@ -685,7 +748,12 @@ def _series_figure(
     return fig
 
 
-def comparison_panel(run_id: str, snapshot: dict, picked: list[dict]) -> None:
+def comparison_panel(
+    run_id: str,
+    snapshot: dict,
+    picked: list[dict],
+    fig_height: int = FIGURE_MAX_HEIGHT,
+) -> None:
     """選択した 2 解の混雑度・移動負担の推移とレイアウトを並べて比較する。"""
     rd = run_store.run_dir(run_id)
     config_dir = str(rd / "config")
@@ -714,25 +782,21 @@ def comparison_panel(run_id: str, snapshot: dict, picked: list[dict]) -> None:
             f"A({solution_name(a)})": [
                 f"{a['f_move']:.3f}",
                 f"{a['f_congestion']:.4g}",
-                "比較基準" if is_baseline(a) else f"rank {a['rank']}",
             ],
             f"B({solution_name(b)})": [
                 f"{b['f_move']:.3f}",
                 f"{b['f_congestion']:.4g}",
-                "比較基準" if is_baseline(b) else f"rank {b['rank']}",
             ],
             "差(B - A)": [
                 f"{b['f_move'] - a['f_move']:+.3f}",
                 f"{b['f_congestion'] - a['f_congestion']:+.4g}",
-                "",
             ],
             "A 比の改善(B)": [
                 rate(b["f_move"], a["f_move"]),
                 rate(b["f_congestion"], a["f_congestion"]),
-                "",
             ],
         },
-        index=["f_move(移動負担)", "f_congestion(混雑度)", "順位"],
+        index=["f_move(移動負担)", "f_congestion(混雑度)"],
     )
     st.dataframe(df_kpi, width="stretch")
 
@@ -741,6 +805,15 @@ def comparison_panel(run_id: str, snapshot: dict, picked: list[dict]) -> None:
             "★ が実会場で実際に使われた配置(booths.yaml の fixed_position)です。"
             "「A 比の改善」が + なら B のほうが良い(目的関数は小さいほど良い)。"
         )
+
+    # --- レイアウトの横並び(シミュレーション不要なので先に出す)
+    st.markdown("**会場レイアウトの比較**")
+    cols = st.columns(2)
+    for col, label, x in zip(cols, labels, xs):
+        with col:
+            st.caption(label)
+            with st.spinner("レイアウトを描画中..."):
+                show_figure(cached_layout_png(config_dir, x, cache_dir), fig_height)
 
     st.caption(
         "推移グラフは 2 解をそれぞれ 1 回シミュレーションして描画します"
@@ -775,13 +848,6 @@ def comparison_panel(run_id: str, snapshot: dict, picked: list[dict]) -> None:
         width="stretch",
         key=f"cmp_move_{run_id}_{snapshot['generation']}",
     )
-
-    st.markdown("**会場レイアウトの比較**")
-    cols = st.columns(2)
-    for col, label, x in zip(cols, labels, xs):
-        with col:
-            st.caption(label)
-            st.image(cached_layout_png(config_dir, x, cache_dir))
 
 
 # ================================================================ 比較基準
@@ -872,7 +938,7 @@ def baseline_panel(run_id: str, snapshot: dict) -> dict | None:
         )
         c3.markdown(
             f"最大改善: **f_move −{dm:.1f}%** / **f_congestion −{dc:.1f}%**  \n"
-            f"<small>解 #{best['_index']}(rank {best['rank']})</small>",
+            f"<small>解 #{best['_index']}</small>",
             unsafe_allow_html=True,
         )
     else:
@@ -894,9 +960,9 @@ def baseline_panel(run_id: str, snapshot: dict) -> dict | None:
 
 def solution_panel(
     run_id: str,
-    snapshot: dict,
     solution: dict,
     baseline: dict | None = None,
+    fig_height: int = FIGURE_MAX_HEIGHT,
 ) -> None:
     rd = run_store.run_dir(run_id)
     config_dir = str(rd / "config")
@@ -918,10 +984,10 @@ def solution_panel(
               delta=delta("f_move"), delta_color="inverse")
     m2.metric("f_congestion", f"{solution['f_congestion']:.4g}",
               delta=delta("f_congestion"), delta_color="inverse")
-    if is_baseline(solution):
-        m3.metric("種別", "実会場配置")
-    else:
-        m3.metric("世代 / 順位", f"{snapshot['generation']} / rank {solution['rank']}")
+    m3.metric(
+        "解",
+        "実会場配置" if is_baseline(solution) else f"#{solution['_index']}",
+    )
 
     if is_baseline(solution) and not solution.get("feasible", True):
         st.warning(
@@ -934,7 +1000,7 @@ def solution_panel(
 
     with tab_layout:
         with st.spinner("レイアウトを描画中..."):
-            st.image(cached_layout_png(config_dir, x, cache_dir))
+            show_figure(cached_layout_png(config_dir, x, cache_dir), fig_height)
 
     with tab_heat:
         st.caption(
@@ -944,7 +1010,7 @@ def solution_panel(
         if st.button("ヒートマップを生成", key=f"heat_{render.design_key(x)}"):
             with st.spinner("シミュレーション中..."):
                 png, kpis = cached_heatmap_png(config_dir, x, cache_dir)
-            st.image(png)
+            show_figure(png, fig_height)
             st.dataframe(
                 pd.DataFrame([kpis]).T.rename(columns={0: "値"}),
                 width="stretch",
@@ -963,31 +1029,53 @@ def solution_panel(
                 gif = cached_animation_gif(
                     config_dir, x, cache_dir, int(frame_interval), int(fps)
                 )
-            st.image(gif)
+            show_figure(gif, fig_height)
 
 
-# ================================================================ 本体
+# ================================================================ ① 入力ページ
 
 
-def main() -> None:
-    st.title("イベント会場ブース配置最適化")
+def input_page() -> None:
+    params = input_panel()
 
-    params = sidebar_inputs()
+    st.divider()
+    c1, c2 = st.columns([1, 3])
+    start = c1.button("最適化を開始", type="primary", width="stretch")
+    c2.caption(
+        "押すと別プロセスでワーカーが動き出し、自動で「② 結果表示」へ移ります。"
+        "ブラウザを閉じても最適化は止まりません。"
+    )
 
-    st.sidebar.divider()
-    if st.sidebar.button("最適化を開始", type="primary", width="stretch"):
-        try:
-            st.session_state["run_id"] = start_run(params)
-            st.session_state.pop("selected", None)
-            st.session_state.pop("slots", None)
-            st.session_state.pop("slot_sig", None)
-        except Exception as exc:  # 設定の不備はここで拾う
-            st.sidebar.error(f"起動に失敗しました: {exc}")
+    if not start:
+        return
 
+    try:
+        st.session_state["run_id"] = start_run(params)
+    except Exception as exc:  # 設定の不備はここで拾う
+        st.error(f"起動に失敗しました: {exc}")
+        return
+
+    st.session_state.pop("selected", None)
+    st.session_state.pop("slots", None)
+    st.session_state.pop("slot_sig", None)
+    # ページ切り替えウィジェットは既に生成済みで、その key を
+    # 直接書き換えると Streamlit が例外を出す。
+    # 次の実行の冒頭で反映させるため、別のキーに置いておく。
+    st.session_state["_goto_page"] = PAGE_RESULT
+    st.rerun()
+
+
+# ================================================================ ② 結果ページ
+
+
+def result_page() -> None:
     # --- 実行の選択(過去の実行も開ける)
     runs = run_store.list_runs()
     if not runs:
-        st.info("左のサイドバーでパラメータを設定し、「最適化を開始」を押してください。")
+        st.info(
+            "まだ実行がありません。"
+            "「① パラメータ入力」で設定し、「最適化を開始」を押してください。"
+        )
         return
 
     default_idx = 0
@@ -1014,10 +1102,23 @@ def main() -> None:
         return
 
     # --- 世代選択
-    c1, c2 = st.columns([4, 1])
+    c1, c2, c3 = st.columns([3, 1, 1])
     with c1:
         gen = st.select_slider("表示する世代", options=gens, value=gens[-1])
     with c2:
+        fig_h = int(
+            st.select_slider(
+                "図の大きさ",
+                options=FIGURE_HEIGHT_OPTIONS,
+                value=FIGURE_MAX_HEIGHT,
+                key="fig_height",
+                help=(
+                    "パレート図は 1 辺、会場レイアウト図・ヒートマップ・"
+                    "動画は表示高さの上限になります[px]。"
+                ),
+            )
+        )
+    with c3:
         st.write("")
         if st.button("最新世代へ", width="stretch"):
             st.rerun()
@@ -1030,12 +1131,18 @@ def main() -> None:
     # --- 比較基準(実会場で実際に使われた配置)
     baseline = baseline_panel(run_id, snapshot)
 
+    # --- パレート図 と 選択解 を横並び
+    #
+    # 「点を選ぶ操作」と「その解の姿」は目を動かさずに見えるべきなので、
+    # 左にパレート図、右に選択解のレイアウト図を置く。
+    # 実会場ポリゴンは縦長だが、show_figure() が高さで頭打ちにするので
+    # パレート図(PARETO_HEIGHT)とバランスが崩れない。
     left, right = st.columns([1, 1])
 
     with left:
         st.subheader("パレート図(点をクリックして解を選択)")
         st.caption(
-            "点を続けて 2 つクリックすると A・B に入り、下で推移を比較できます。"
+            "点を続けて 2 つクリックすると A・B に入り、すぐ下で比較できます。"
             "3 つ目をクリックすると古い方(A)が押し出されます。"
             "★(実会場配置)もクリックして比較対象にできます。"
             "やり直すときは「選択をクリア」。"
@@ -1049,9 +1156,15 @@ def main() -> None:
             gen, st.session_state.get(chart_key), snapshot, baseline
         )
 
+        st.caption(
+            f"第 {snapshot['generation']} 世代の集団"
+            f"({len(snapshot['solutions'])} 解)"
+        )
+        # width="content" にして、図が持つ固定サイズ(正方形の描画領域)を
+        # Streamlit 側で引き伸ばさせない。
         event = st.plotly_chart(
-            pareto_figure(snapshot, slots, baseline),
-            width="stretch",
+            pareto_figure(snapshot, slots, baseline, fig_h),
+            width="content",
             on_select="rerun",
             selection_mode="points",
             key=chart_key,
@@ -1066,30 +1179,59 @@ def main() -> None:
         slot_controls(slots)
 
     with right:
-        st.subheader("選択した解")
         selected = slots[-1] if slots else None
         if selected is None:
             solutions = snapshot["solutions"]
             if solutions:
-                st.caption(
-                    "未選択のため、この世代の f_move 最小解を表示しています。"
-                )
+                st.caption("未選択のため、この世代の f_move 最小解を表示しています。")
                 selected = dict(solutions[0], _index=0)
         if selected is None:
             st.info("この世代には実行可能解がありません。")
         else:
-            solution_panel(run_id, snapshot, selected, baseline)
+            solution_panel(run_id, selected, baseline, fig_h)
 
-    # --- 2 解の比較
+    # --- 2 解の比較(パレート図のすぐ下)
     st.divider()
     st.subheader("2 解の比較")
     if len(slots) >= 2:
-        comparison_panel(run_id, snapshot, slots)
+        comparison_panel(run_id, snapshot, slots, fig_h)
     else:
         st.info(
             "パレート図の点を 2 つクリックする(または矩形選択で 2 点選ぶ)と、"
             "混雑度と移動負担の推移をここで重ねて比較できます。"
         )
+
+
+# ================================================================ 本体
+
+
+def main() -> None:
+    st.title("イベント会場ブース配置最適化")
+
+    # st.tabs はクリックのたびの再実行で選択が先頭に戻ることがあるため、
+    # ページ切り替えは session_state に残る segmented_control で行う。
+    # ウィジェット生成より前でないと key を書き換えられないので、
+    # 「開始ボタンから結果ページへ飛ぶ」指示はここで反映する。
+    st.session_state.setdefault("page", PAGE_INPUT)
+    goto = st.session_state.pop("_goto_page", None)
+    if goto is not None:
+        st.session_state["page"] = goto
+
+    page = st.segmented_control(
+        "画面",
+        options=[PAGE_INPUT, PAGE_RESULT],
+        key="page",
+        label_visibility="collapsed",
+    )
+    # 選択中の項目をもう一度押すと None になるので、直前の画面を保つ。
+    if page is None:
+        page = st.session_state.get("last_page", PAGE_INPUT)
+    st.session_state["last_page"] = page
+
+    if page == PAGE_INPUT:
+        input_page()
+    else:
+        result_page()
 
 
 # streamlit run は __name__ == "__main__" でこのスクリプトを実行する。
