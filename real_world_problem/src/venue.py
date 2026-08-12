@@ -131,6 +131,9 @@ class Layout:
     booth_exits: tuple             # ブース体験後に再出現するセル (x, y)
     queue_cells: tuple            # ブースごとの待ち行列セル列 ((x,y),...)(§5.2)
     table_access_cells: tuple      # テーブル周囲4辺の利用可能セル列
+    # ブース等だけを除いた元の通行可能マスク。walkable はここから
+    # 最低通路幅を満たさないセルを除いた、実際に経路探索で使うマスク。
+    raw_walkable: np.ndarray | None = None
 
 
 def _points_in_polygon(px: np.ndarray, py: np.ndarray, polygon) -> np.ndarray:
@@ -598,6 +601,50 @@ def position_bounds(
     )
 
 
+def passable_corridor_mask(
+    raw_walkable: np.ndarray,
+    min_width: int,
+) -> np.ndarray:
+    """最低幅 ``min_width`` を満たすセルだけを通行可能として返す。
+
+    あるセルを人が歩けるのは、そのセルが少なくとも1つの
+    ``min_width × min_width`` 全通行可能ブロックに含まれる場合だけとする。
+    したがって、広い空間同士を結ぶ隙間が3セル以下なら、A*/BFSからも
+    除外され、エージェントが細い隙間をすり抜けることはない。
+    """
+    raw = np.asarray(raw_walkable, dtype=bool)
+    if raw.ndim != 2:
+        raise ValueError("raw_walkable must be a 2-D array")
+    width = int(min_width)
+    if width < 1:
+        raise ValueError("min_width must be at least 1")
+    if width == 1:
+        return raw.copy()
+
+    height, grid_width = raw.shape
+    if height < width or grid_width < width:
+        return np.zeros_like(raw)
+
+    block_height = height - width + 1
+    block_width = grid_width - width + 1
+    full_blocks = np.ones((block_height, block_width), dtype=bool)
+    for dy in range(width):
+        for dx in range(width):
+            full_blocks &= raw[
+                dy : dy + block_height,
+                dx : dx + block_width,
+            ]
+
+    passable = np.zeros_like(raw)
+    for dy in range(width):
+        for dx in range(width):
+            passable[
+                dy : dy + block_height,
+                dx : dx + block_width,
+            ] |= full_blocks
+    return passable
+
+
 def apply_layout(
     cfg: Config,
     venue: Venue,
@@ -664,13 +711,20 @@ def apply_layout(
             grid[qy, qx] = QUEUE
             capacity[qy, qx] = cfg.cap_queue
 
-    walkable = np.isin(
+    raw_walkable = np.isin(
         grid,
         WALKABLE_TYPES,
     )
 
     if not cfg.queue_walkable:
-        walkable[grid == QUEUE] = False
+        raw_walkable[grid == QUEUE] = False
+
+    # 最低幅を満たさない隙間は、配置違反として数えるだけでなく実際の
+    # 経路探索からも除外する。これにより1～3セル幅の通路を歩かない。
+    walkable = passable_corridor_mask(
+        raw_walkable,
+        cfg.min_corridor_width,
+    )
 
     return Layout(
         grid=grid,
@@ -684,4 +738,5 @@ def apply_layout(
         booth_exits=tuple(booth_exits),
         queue_cells=tuple(queue_cells),
         table_access_cells=tuple(table_access_cells),
+        raw_walkable=raw_walkable,
     )

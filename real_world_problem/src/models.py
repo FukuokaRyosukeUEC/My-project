@@ -29,6 +29,10 @@ EXIT = 6
 #: 通行可能セル種別(§4.2【v2】)。FORBIDDEN は「配置不可だが通行可」を既定とする。
 WALKABLE_TYPES = (EMPTY, FORBIDDEN, QUEUE, ENTRANCE, EXIT)
 
+#: 人が通行できる通路の物理的な最小幅。設定値がこれを下回っても、
+#: シミュレーションと配置制約では 4 セルを下限として扱う。
+MIN_PEDESTRIAN_CORRIDOR_WIDTH_CELLS = 4
+
 # ---------------------------------------------------------------- 来場者状態(§6.2)
 NOT_ARRIVED = 0
 CHOOSING = 1
@@ -53,6 +57,8 @@ class BoothSpec:
         kitchen_car : キッチンカー(挙動はブースと同じ。色分け用の属性)
         table       : 方向・専用出入口を持たないテーブル・椅子。周囲4辺から
                       着席して疲労を回復する。capacity は同時着席可能人数。
+        waste_station: ゴミステーション。通常時は低確率、飲食後は高確率で
+                       立ち寄る付帯設備で、体験ブース数には数えない。
     theme:
         normal / music(音楽祭関連)。色分け用の属性。
     area:
@@ -82,6 +88,40 @@ class BoothSpec:
     def is_table(self) -> bool:
         """休憩・飲食に利用できるテーブル（ベンチ）か。"""
         return self.kind == "table"
+
+    @property
+    def is_waste_station(self) -> bool:
+        """来場者がごみを捨てるために利用するゴミステーションか。
+
+        新規設定では ``kind: waste_station`` を推奨する。既存の booths.yaml
+        との互換性のため、kind/category/theme/name に従来使われていた表記が
+        含まれる場合もゴミステーションとして認識する。
+        """
+        kind = self.kind.strip().casefold()
+        if kind in {
+            "waste_station",
+            "garbage_station",
+            "trash_station",
+            "recycling_station",
+        }:
+            return True
+        description = " ".join(
+            (self.category, self.theme, self.name)
+        ).strip().casefold()
+        return any(
+            marker in description
+            for marker in (
+                "waste station",
+                "waste_station",
+                "garbage",
+                "trash",
+                "recycling",
+                "ゴミステーション",
+                "ごみステーション",
+                "ゴミ捨て",
+                "ごみ捨て",
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -161,6 +201,10 @@ class Config:
     fatigue_experience_per_second: float = 0.0004
     fatigue_recovery_per_second: float = 0.015
     table_occupancy_weight: float = 0.5
+    # ゴミステーション利用。通常来場者は低確率、飲食後は高確率で利用する。
+    waste_station_general_probability: float = 0.05
+    waste_station_after_food_probability: float = 0.85
+    waste_station_after_categories: tuple = ("food",)
     # 効用(§8)
     softmax_temperature: float = 0.3
     q_norm_seconds: float = 600.0
@@ -174,7 +218,7 @@ class Config:
     # 到着プロファイル(§7): ((start, end, rate), ...)
     arrival_profile: tuple = ((0.0, 400.0, 1.0),)
     # 制約(§14)
-    min_corridor_width: int = 1
+    min_corridor_width: int = MIN_PEDESTRIAN_CORRIDOR_WIDTH_CELLS
     # 幸福度(§13)
     hap_alpha: float = 0.05
     hap_beta: float = 0.1
@@ -262,6 +306,33 @@ def load_config(config_dir: str | Path) -> Config:
             raise ValueError("booth fixed_position must be [x, y, theta]")
         return values
 
+    def _is_waste_station_item(item: dict) -> bool:
+        kind = str(item.get("kind", "booth")).strip().casefold()
+        if kind in {
+            "waste_station",
+            "garbage_station",
+            "trash_station",
+            "recycling_station",
+        }:
+            return True
+        description = " ".join(
+            str(item.get(key, "")) for key in ("category", "theme", "name")
+        ).casefold()
+        return any(
+            marker in description
+            for marker in (
+                "waste station",
+                "waste_station",
+                "garbage",
+                "trash",
+                "recycling",
+                "ゴミステーション",
+                "ごみステーション",
+                "ゴミ捨て",
+                "ごみ捨て",
+            )
+        )
+
     booths = tuple(
         BoothSpec(
             booth_id=int(b["booth_id"]),
@@ -269,8 +340,15 @@ def load_config(config_dir: str | Path) -> Config:
             height=int(b["height"]),
             category=str(b.get("category", "none")),
             attractiveness=float(b.get("attractiveness", 0.0)),
-            capacity=int(
-                b.get("capacity", 4 if str(b.get("kind", "booth")) == "table" else 0)
+            capacity=(
+                max(1, int(b.get("capacity", 1)))
+                if _is_waste_station_item(b)
+                else int(
+                    b.get(
+                        "capacity",
+                        4 if str(b.get("kind", "booth")) == "table" else 0,
+                    )
+                )
             ),
             mean_service_seconds=float(b.get("mean_service_seconds", 0.0)),
             max_queue_length=int(b.get("max_queue_length", 0)),
@@ -296,10 +374,11 @@ def load_config(config_dir: str | Path) -> Config:
         )
         for p in prof_raw
     )
-    # カテゴリ順は booths.yaml の出現順(重複除去)。テーブルは対象外。
+    # カテゴリ順は booths.yaml の出現順(重複除去)。テーブルと
+    # ゴミステーションは効用で選ぶ体験ブースではないため対象外。
     categories: list[str] = []
     for b in booths:
-        if not b.is_table and b.category not in categories:
+        if not b.is_table and not b.is_waste_station and b.category not in categories:
             categories.append(b.category)
 
     shape = main.get("venue_shape") or {}
@@ -318,6 +397,7 @@ def load_config(config_dir: str | Path) -> Config:
 
     uw = main["utility_weights"]
     resting = main.get("resting") or {}
+    waste_disposal = main.get("waste_disposal") or {}
     happiness_cfg = main.get("happiness") or {}
     cfg = Config(
         grid_width=int(main["grid"]["width"]),
@@ -381,6 +461,19 @@ def load_config(config_dir: str | Path) -> Config:
             resting.get("fatigue_recovery_per_second", 0.015)
         ),
         table_occupancy_weight=float(resting.get("occupancy_weight", 0.5)),
+        waste_station_general_probability=float(
+            waste_disposal.get("general_probability", 0.05)
+        ),
+        waste_station_after_food_probability=float(
+            waste_disposal.get("after_food_probability", 0.85)
+        ),
+        waste_station_after_categories=tuple(
+            str(value)
+            for value in waste_disposal.get(
+                "after_categories",
+                resting.get("after_categories", ["food"]),
+            )
+        ),
         softmax_temperature=float(main["simulation"]["softmax_temperature"]),
         q_norm_seconds=float(main["simulation"]["q_norm_seconds"]),
         giveup_utility_penalty=float(main["simulation"]["giveup_utility_penalty"]),
@@ -391,7 +484,15 @@ def load_config(config_dir: str | Path) -> Config:
         w_queue=float(uw["queue"]),
         w_crowd=float(uw["crowd"]),
         arrival_profile=tuple(tuple(float(v) for v in row) for row in main["arrival_profile"]),
-        min_corridor_width=int(main["constraints"]["min_corridor_width"]),
+        min_corridor_width=max(
+            MIN_PEDESTRIAN_CORRIDOR_WIDTH_CELLS,
+            int(
+                (main.get("constraints") or {}).get(
+                    "min_corridor_width",
+                    MIN_PEDESTRIAN_CORRIDOR_WIDTH_CELLS,
+                )
+            ),
+        ),
         hap_alpha=float(happiness_cfg["alpha"]),
         hap_beta=float(happiness_cfg["beta"]),
         hap_gamma=float(happiness_cfg["gamma"]),
@@ -409,12 +510,25 @@ def load_config(config_dir: str | Path) -> Config:
         raise ValueError("simulation.congestion_travel_time_weight must be non-negative")
     if not 0.0 <= cfg.table_after_food_probability <= 1.0:
         raise ValueError("resting.after_food_probability must be in [0, 1]")
+    if not 0.0 <= cfg.waste_station_general_probability < 1.0:
+        raise ValueError("waste_disposal.general_probability must be in [0, 1)")
+    if not 0.0 <= cfg.waste_station_after_food_probability < 1.0:
+        raise ValueError("waste_disposal.after_food_probability must be in [0, 1)")
+    if (
+        cfg.waste_station_after_food_probability
+        <= cfg.waste_station_general_probability
+    ):
+        raise ValueError(
+            "waste_disposal.after_food_probability must exceed general_probability"
+        )
     if cfg.table_rest_seconds <= 0.0:
         raise ValueError("resting.rest_seconds must be positive")
     if not 0.0 <= cfg.fatigue_rest_threshold <= 1.0:
         raise ValueError("resting.fatigue_threshold must be in [0, 1]")
     if any(b.is_table and b.capacity < 1 for b in cfg.booths):
         raise ValueError("table capacity must be at least 1")
+    if any(b.is_waste_station and b.capacity < 1 for b in cfg.booths):
+        raise ValueError("waste station capacity must be at least 1")
     return cfg
 
 
@@ -444,6 +558,8 @@ class Visitor:
     distance_weight_factor: float
     profile_name: str
     table_after_food_propensity: float = 1.0
+    general_waste_propensity: float = 1.0
+    food_waste_propensity: float = 1.0
     #: 素通り客(ブースへ行かず別の開口部へ抜ける通行人)。
     is_passerby: bool = False
     #: 素通り客が目指す開口部(連結成分)の番号。None なら最寄りの開口部から退出する。
@@ -473,3 +589,13 @@ class Visitor:
     table_visit_count: int = 0
     food_table_visit_count: int = 0
     table_seconds: float = 0.0
+    # --- ゴミステーション利用 ---
+    general_waste_decided: bool = False
+    waste_station_requested: bool = False
+    waste_requested_after_food: bool = False
+    waste_station_request_count: int = 0
+    waste_station_visit_count: int = 0
+    waste_station_give_up_count: int = 0
+    food_waste_opportunity_count: int = 0
+    food_waste_request_count: int = 0
+    food_waste_visit_count: int = 0

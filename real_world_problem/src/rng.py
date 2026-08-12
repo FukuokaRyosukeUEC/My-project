@@ -4,6 +4,7 @@
 系統2: 来場者ごとの意思決定(softmax 抽選)。visitor_id 単位で独立ストリーム。
 系統3: 競合解決のタイブレーク。
 系統(サブシード)3 は §15.3 の初期集団サンプリング用に予約。
+系統4: ゴミステーション利用選好。既存の来場者属性乱数列を変えない。
 
 グローバルな np.random は一切使用しない(§25)。
 """
@@ -33,6 +34,11 @@ def tiebreak_rng(seed: int) -> np.random.Generator:
 def sampling_rng(seed: int) -> np.random.Generator:
     """§15.3: 初期集団のリジェクションサンプリング用。"""
     return np.random.default_rng([seed, 3])
+
+
+def waste_behavior_rng(seed: int) -> np.random.Generator:
+    """系統4: 通常時・飲食後のゴミステーション利用選好生成用。"""
+    return np.random.default_rng([seed, 4])
 
 
 def softmax_choice(rng: np.random.Generator, candidate_ids: list, probabilities: np.ndarray):

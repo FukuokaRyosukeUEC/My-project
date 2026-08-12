@@ -3,7 +3,9 @@
 違反量の定義(§14【v2】):
 - 項目 1〜5(幾何): 違反セル数を合算(重み 1)
 - 項目 6〜7(BFS 到達性): 違反件数 × 100
-- 項目 8(最低通路幅): 違反セル数 × 1(幾何量として扱う。実装注記)
+
+最低通路幅4セルはシミュレーションの歩行可能セルにだけ適用し、
+初期個体生成・配置制約の違反量 g には一切含めない。
 有効配置は g = 0。無効配置はシミュレーションを実行しない。
 """
 from __future__ import annotations
@@ -283,9 +285,16 @@ def compute_violation(
     if g > 0:
         return g  # 幾何違反があれば到達性チェックは行わない(高速化)
 
-    # --- 有効な幾何配置についてグリッドを構築し、項目 6〜8 を検査
+    # --- 有効な幾何配置についてグリッドを構築し、項目 6〜7 を検査
     layout = apply_layout(cfg, venue, positions)
-    walkable = layout.walkable
+
+    # 配置制約と初期個体生成には、4セル幅処理前の従来マスクを使う。
+    # layout.walkable はシミュレーション専用で、ここでは参照しない。
+    walkable = (
+        layout.raw_walkable
+        if layout.raw_walkable is not None
+        else layout.walkable
+    )
 
     ent_field = bfs_distance_field(walkable, venue.entrance_cells)
 
@@ -300,7 +309,7 @@ def compute_violation(
         rx, ry = receptions[b]
         if ent_field[ry, rx] >= INF_DIST:
             g += REACHABILITY_PENALTY
-        
+
     # テーブル周囲4辺の全アクセスセルへ到達できることを要求する。
     for b in range(n_booths):
         for tx, ty in table_access_cells[b]:
@@ -315,25 +324,6 @@ def compute_violation(
         ex, ey = cell
         if exit_field[ey, ex] >= INF_DIST:
             g += REACHABILITY_PENALTY
-
-    # 項目 8: 最低通路幅(既定 2 セル)
-    # 判定: 各通行可能セルが、少なくとも 1 つの「幅 w × w の全通行可能ブロック」に
-    # 属していれば合格。属さないセル数を違反セル数として加算する。
-    w = cfg.min_corridor_width
-    ok_block = np.zeros_like(walkable)
-    # w×w ブロックの AND をシフト積で計算
-    blk = walkable.copy()
-    for _ in range(w - 1):
-        blk = blk[:, :-1] & blk[:, 1:]
-    for _ in range(w - 1):
-        blk = blk[:-1, :] & blk[1:, :]
-    # blk[j,i] == True なら (i..i+w-1, j..j+w-1) が全て通行可能
-    for j in range(blk.shape[0]):
-        for i in range(blk.shape[1]):
-            if blk[j, i]:
-                ok_block[j : j + w, i : i + w] = True
-    narrow = walkable & ~ok_block
-    g += float(np.sum(narrow))
 
     return g
 

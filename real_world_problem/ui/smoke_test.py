@@ -107,6 +107,19 @@ def main() -> int:
         abs(max(r[1] for r in cfg.arrival_profile) - args.duration) < 1e-6,
         f"終端 {max(r[1] for r in cfg.arrival_profile):.1f} 秒",
     )
+    ok &= check(
+        "実際の通行可能幅が4セル以上",
+        cfg.min_corridor_width >= 4,
+        f"{cfg.min_corridor_width} セル",
+    )
+    ok &= check(
+        "ゴミステーション利用確率が通常時 < 飲食後 < 100%",
+        0.0 <= cfg.waste_station_general_probability
+        < cfg.waste_station_after_food_probability
+        < 1.0,
+        f"通常 {cfg.waste_station_general_probability:.0%} / "
+        f"飲食後 {cfg.waste_station_after_food_probability:.0%}",
+    )
     if args.venue == "rect":
         ok &= check("矩形モードで会場ポリゴンが空", cfg.venue_areas == ())
     else:

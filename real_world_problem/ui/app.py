@@ -177,12 +177,17 @@ def sidebar_inputs() -> run_store.RunParams:
                 "出口の辺", ["top", "bottom", "left", "right"], index=0
             )
             span = st.number_input(
-                "入退場口の幅(セル)", min_value=1, max_value=20, value=2, step=1
+                "入退場口の幅(セル)",
+                min_value=4,
+                max_value=20,
+                value=max(4, int(preset_main["entrance_exit"].get("span_cells", 4))),
+                step=1,
+                help="エージェントは4セル以上の幅がある場所だけを通行します。",
             )
         else:
             grid_width = int(preset_main["grid"]["width"])
             grid_height = int(preset_main["grid"]["height"])
-            entrance_side, exit_side, span = "bottom", "top", 2
+            entrance_side, exit_side, span = "bottom", "top", 4
             st.caption(
                 f"会場サイズ: {grid_width} × {grid_height} セル(実会場ポリゴン、編集不可)"
             )
@@ -239,7 +244,17 @@ def sidebar_inputs() -> run_store.RunParams:
                 "魅力度", min_value=0.0, max_value=1.0, step=0.05
             ),
             "kind": st.column_config.SelectboxColumn(
-                "種別", options=["booth", "kitchen_car", "table"]
+                "種別",
+                options=[
+                    "booth",
+                    "kitchen_car",
+                    "table",
+                    "waste_station",
+                    "garbage_station",
+                    "trash_station",
+                    "recycling_station",
+                ],
+                help="ゴミステーションは waste_station を選択します。",
             ),
         },
     )
@@ -264,6 +279,24 @@ def sidebar_inputs() -> run_store.RunParams:
             "1 評価のタイムアウト(秒)", min_value=1.0, max_value=3600.0,
             value=30.0, step=5.0,
             help="1 配置のシミュレーションがこの時間を超えると打ち切り、ペナルティ値になります。",
+        )
+        waste_cfg = preset_main.get("waste_disposal") or {}
+        general_waste_probability = st.number_input(
+            "通常時のゴミステーション利用確率",
+            min_value=0.0,
+            max_value=0.99,
+            value=float(waste_cfg.get("general_probability", 0.05)),
+            step=0.01,
+            format="%.2f",
+        )
+        food_waste_probability = st.number_input(
+            "飲食後のゴミステーション利用確率",
+            min_value=0.0,
+            max_value=0.99,
+            value=float(waste_cfg.get("after_food_probability", 0.85)),
+            step=0.01,
+            format="%.2f",
+            help="100%には設定できません。テーブル利用後もこの確率で立ち寄ります。",
         )
 
     # --- 最適化
@@ -317,6 +350,8 @@ def sidebar_inputs() -> run_store.RunParams:
         dt_seconds=float(dt),
         evaluation_seed=int(seed),
         timeout_seconds=float(timeout),
+        waste_station_general_probability=float(general_waste_probability),
+        waste_station_after_food_probability=float(food_waste_probability),
         population_size=int(pop),
         n_generations=int(gen),
         workers=int(workers),
