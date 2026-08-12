@@ -69,7 +69,7 @@ class RunParams:
     cell_size_meters: float = 1.0
     entrance_side: str = "bottom"   # rect のときのみ有効
     exit_side: str = "top"
-    entrance_exit_span: int = 2
+    entrance_exit_span: int = 4
 
     # --- ブース(booths.yaml の行そのもの)
     booths: list = field(default_factory=list)
@@ -80,6 +80,8 @@ class RunParams:
     dt_seconds: float = 1.0
     evaluation_seed: int = 0
     timeout_seconds: float = 30.0
+    waste_station_general_probability: float = 0.05
+    waste_station_after_food_probability: float = 0.85
 
     # --- 最適化
     population_size: int = 16
@@ -139,6 +141,12 @@ class RunParams:
             "dt_seconds": float(self.dt_seconds),
             "evaluation_seed": int(self.evaluation_seed),
             "timeout_seconds": float(self.timeout_seconds),
+            "waste_station_general_probability": float(
+                self.waste_station_general_probability
+            ),
+            "waste_station_after_food_probability": float(
+                self.waste_station_after_food_probability
+            ),
             "population_size": int(self.population_size),
             "n_generations": int(self.n_generations),
             "workers": int(self.workers),
@@ -197,6 +205,15 @@ class RunParams:
             raise ValueError("最適化シードは 0 以上にしてください")
         if int(self.initial_max_trials) < 1:
             raise ValueError("初期個体の最大試行回数は 1 以上にしてください")
+
+        general_waste = float(self.waste_station_general_probability)
+        food_waste = float(self.waste_station_after_food_probability)
+        if not 0.0 <= general_waste < 1.0:
+            raise ValueError("通常時のゴミステーション利用確率は 0 以上 1 未満にしてください")
+        if not 0.0 <= food_waste < 1.0:
+            raise ValueError("飲食後のゴミステーション利用確率は 0 以上 1 未満にしてください")
+        if food_waste <= general_waste:
+            raise ValueError("飲食後の利用確率は通常時より高くしてください")
 
         probability = float(self.mutation_individual_prob)
         if not 0.0 <= probability <= 1.0:
@@ -315,6 +332,22 @@ def build_config_dir(params: RunParams, dest: Path) -> Path:
     main["simulation"]["n_visitors"] = int(params.n_visitors)
     main["simulation"]["evaluation_seed"] = int(params.evaluation_seed)
     main["simulation"]["timeout_seconds"] = float(params.timeout_seconds)
+
+    # 4セル未満の隙間は配置制約だけでなく、実際の経路探索でも通行不可。
+    constraints = main.setdefault("constraints", {})
+    constraints["min_corridor_width"] = max(
+        4,
+        int(constraints.get("min_corridor_width", 4)),
+    )
+
+    waste_disposal = main.setdefault("waste_disposal", {})
+    waste_disposal["general_probability"] = float(
+        params.waste_station_general_probability
+    )
+    waste_disposal["after_food_probability"] = float(
+        params.waste_station_after_food_probability
+    )
+    waste_disposal.setdefault("after_categories", ["food"])
 
     # 到着プロファイルの区間はシミュレート時間に追随させる
     # (プリセットの形状比率を保ったまま横軸を伸縮する)。

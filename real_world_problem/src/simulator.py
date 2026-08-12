@@ -458,15 +458,11 @@ class Simulation:
                 v = self._visitor(vid)
                 self.occupancy[ey, ex] += 1
                 v.position = (ex, ey)
-                v.visited_booths.add(rt.booth_id)
-                if spec.category in self.cfg.table_after_categories:
-                    wants_table = (
-                        v.table_after_food_propensity
-                        < self.cfg.table_after_food_probability
-                    )
-                    v.table_requested_after_food = wants_table
-                    if wants_table:
-                        v.table_requests_after_food += 1
+                if spec.is_waste_station:
+                    self._complete_waste_station_visit(v)
+                else:
+                    v.visited_booths.add(rt.booth_id)
+                    self._schedule_post_experience_actions(v, spec)
                 # max_visit 超過時は意思決定で EXITING へ(§6.2)
                 self._set_state(v, CHOOSING)
 
@@ -484,6 +480,62 @@ class Simulation:
                 self._set_state(v, EXPERIENCING)
                 rt.active_users[vid] = t + self.service_steps[rt.booth_id]
                 self._shift_queue(rt)
+
+    def _schedule_post_experience_actions(self, v: Visitor, spec) -> None:
+        """体験後のテーブル・ゴミステーション利用を予約する。
+
+        飲食後はまずテーブル利用を判定し、ゴミ廃棄の判定は独立に行う。
+        両方を希望した場合、意思決定側が必ずテーブルを先に選ぶため、
+        ``飲食→テーブル→ゴミステーション`` の順になる。
+        """
+        cfg = self.cfg
+        if spec.category in cfg.table_after_categories:
+            wants_table = (
+                v.table_after_food_propensity
+                < cfg.table_after_food_probability
+            )
+            v.table_requested_after_food = wants_table
+            if wants_table:
+                v.table_requests_after_food += 1
+
+        if spec.category in cfg.waste_station_after_categories:
+            # 飲食利用者には通常利用の低確率判定を重ねず、高確率の専用判定を使う。
+            v.general_waste_decided = True
+            v.food_waste_opportunity_count += 1
+            wants_waste_station = (
+                v.food_waste_propensity
+                < cfg.waste_station_after_food_probability
+            )
+            if wants_waste_station:
+                v.waste_station_requested = True
+                v.waste_requested_after_food = True
+                v.waste_station_request_count += 1
+                v.food_waste_request_count += 1
+        else:
+            self._request_general_waste_station(v)
+
+    def _request_general_waste_station(self, v: Visitor) -> bool:
+        """通常来場者について一度だけ低確率の廃棄行動を判定する。"""
+        if v.general_waste_decided:
+            return v.waste_station_requested
+        v.general_waste_decided = True
+        if (
+            v.general_waste_propensity
+            < self.cfg.waste_station_general_probability
+        ):
+            v.waste_station_requested = True
+            v.waste_requested_after_food = False
+            v.waste_station_request_count += 1
+        return v.waste_station_requested
+
+    @staticmethod
+    def _complete_waste_station_visit(v: Visitor) -> None:
+        """ゴミステーション利用を記録し、現在の廃棄要求を完了する。"""
+        v.waste_station_visit_count += 1
+        if v.waste_requested_after_food:
+            v.food_waste_visit_count += 1
+        v.waste_station_requested = False
+        v.waste_requested_after_food = False
 
     def _table_step(self, rt: BoothRuntime, t: int) -> None:
         """休憩完了者を周囲4辺の空きセルへ戻す。待機列は作らない。"""
@@ -542,8 +594,7 @@ class Simulation:
             for vid in leavers:
                 rt.queue.remove(vid)
                 v = self._visitor(vid)
-                v.give_up_count += 1
-                v.given_up_booths.add(rt.booth_id)
+                self._give_up_target(v, rt.booth_id)
                 # その場(現在の行列セル)から再選択
                 self._set_state(v, CHOOSING)
                 v.current_queue_wait = 0.0
@@ -566,17 +617,27 @@ class Simulation:
     def _choose_target(self, v: Visitor, t: int) -> None:
         """効用 + softmax によるブース選択(§8)。候補なしなら EXITING。"""
         cfg = self.cfg
+        # 飲食後は「テーブル or ゴミステーション」。両方を利用する人は
+        # テーブルを先にし、離席後も残る waste_station_requested に従って
+        # ゴミステーションへ向かう。
+        if v.table_requested_after_food:
+            if self._choose_table(v, t):
+                return
+            # テーブルが存在しない・全席満席・到達不能なら廃棄行動へ進む。
+            v.table_requested_after_food = False
+        if v.waste_station_requested and self._choose_waste_station(v, t):
+            return
         if (
-            v.table_requested_after_food
-            or v.fatigue >= cfg.fatigue_rest_threshold
-        ) and self._choose_table(v, t):
+            v.fatigue >= cfg.fatigue_rest_threshold
+            and self._choose_table(v, t)
+        ):
             return
         x, y = v.position
         cand_ids: list[int] = []
         utils: list[float] = []
         for b, spec in enumerate(cfg.booths):
-            if spec.is_table or b in v.visited_booths:
-                continue  # テーブルと体験済みは除外
+            if spec.is_table or spec.is_waste_station or b in v.visited_booths:
+                continue  # 付帯設備と体験済みブースは除外
             field_b = self.booth_fields[b]
             if field_b[y, x] >= INF_DIST:
                 continue
@@ -587,6 +648,13 @@ class Simulation:
             utils.append(u)
 
         if not cand_ids or max(utils) < cfg.utility_min_threshold:
+            # まだ通常利用判定をしていない来場者は、退出直前にも一度だけ
+            # ペットボトル等を捨てる低確率の機会を持つ。
+            if (
+                self._request_general_waste_station(v)
+                and self._choose_waste_station(v, t)
+            ):
+                return
             self._start_exiting(v)
             return
 
@@ -672,6 +740,84 @@ class Simulation:
         v.blocked_count = 0
         self._set_state(v, WALKING)
         return True
+
+    def _choose_waste_station(self, v: Visitor, t: int) -> bool:
+        """到達可能なゴミステーションを距離と待ち時間から選択する。"""
+        cfg = self.cfg
+        x, y = v.position
+        candidates: list[int] = []
+        utilities: list[float] = []
+        for b, spec in enumerate(cfg.booths):
+            if not spec.is_waste_station:
+                continue
+            field = self.booth_fields[b]
+            if field is None or field[y, x] >= INF_DIST:
+                continue
+            runtime = self.booths[b]
+            queue_capacity = (
+                len(self.layout.queue_cells[b])
+                * cfg.queue_capacity_per_cell
+            )
+            if (
+                len(runtime.active_users) >= spec.capacity
+                and len(runtime.queue) >= queue_capacity
+            ):
+                continue
+            distance = float(field[y, x]) / cfg.d_max
+            estimated_wait = (
+                len(runtime.queue)
+                * spec.mean_service_seconds
+                / max(spec.capacity, 1)
+                / max(cfg.q_norm_seconds, 1.0)
+            )
+            candidates.append(b)
+            utilities.append(-distance - cfg.w_queue * estimated_wait)
+        if not candidates:
+            return False
+
+        values = np.asarray(utilities, dtype=float)
+        z = (values - values.max()) / cfg.softmax_temperature
+        probabilities = np.exp(z)
+        probabilities /= probabilities.sum()
+        target = softmax_choice(
+            self._rng_of(v.visitor_id), candidates, probabilities
+        )
+        v.target_booth_id = target
+        goal = self.layout.receptions[target]
+        if v.position == goal:
+            v.path, v.path_index = [], 0
+            self._set_state(v, WALKING)
+            self._arrive_at_reception(v, t)
+            return True
+        path = astar(
+            self.walkable,
+            self.occupancy,
+            self.capacity,
+            v.position,
+            {goal},
+            v.congestion_avoidance,
+            self.booth_fields[target],
+        )
+        if path is None:
+            return False
+        v.path, v.path_index = path, 0
+        v.steps_since_plan = 0
+        v.blocked_count = 0
+        self._set_state(v, WALKING)
+        return True
+
+    def _give_up_target(self, v: Visitor, booth_id: int | None) -> None:
+        """通常ブースとゴミステーションの諦めを別々に集計する。"""
+        if booth_id is None:
+            return
+        if self.cfg.booths[booth_id].is_waste_station:
+            v.waste_station_give_up_count += 1
+            # 捨てずに持ち歩く選択として、この廃棄要求はここで終了する。
+            v.waste_station_requested = False
+            v.waste_requested_after_food = False
+        else:
+            v.give_up_count += 1
+            v.given_up_booths.add(booth_id)
 
     def _utility(self, v: Visitor, b: int, static_dist: int) -> float:
         """§8 の正規化済み効用。"""
@@ -912,8 +1058,7 @@ class Simulation:
             v.steps_since_plan = 0
             v.blocked_count = 0
         elif v.state == WALKING:
-            v.given_up_booths.add(v.target_booth_id)
-            v.give_up_count += 1
+            self._give_up_target(v, v.target_booth_id)
             self._set_state(v, CHOOSING)
             v.path, v.path_index = [], 0
 
@@ -960,8 +1105,7 @@ class Simulation:
         remaining = (cfg.n_steps - t) * cfg.dt_seconds
         queue_capacity = len(self.layout.queue_cells[b]) * cfg.queue_capacity_per_cell
         if len(rt.queue) >= queue_capacity or remaining < est_wait + spec.mean_service_seconds:
-            v.give_up_count += 1
-            v.given_up_booths.add(b)
+            self._give_up_target(v, b)
             self._set_state(v, CHOOSING)
             return
 

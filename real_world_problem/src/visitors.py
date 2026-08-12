@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .models import Config, Visitor, NOT_ARRIVED
-from .rng import visitor_gen_rng
+from .rng import visitor_gen_rng, waste_behavior_rng
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,8 @@ class VisitorRecord:
     distance_weight_factor: float
     interests: tuple  # カテゴリ別興味 [0,1]
     table_after_food_propensity: float = 1.0  # 配置に依存しない着席選好 U(0,1)
+    general_waste_propensity: float = 1.0  # 通常時のゴミステーション利用選好
+    food_waste_propensity: float = 1.0  # 飲食後のゴミステーション利用選好
     is_passerby: bool = False  # ブースへ行かず会場を通り抜けるだけの通行人
 
 
@@ -39,6 +41,9 @@ def generate_visitor_table(cfg: Config) -> tuple:
     4. (入場時刻, プロファイル, 興味) を一括生成し固定
     """
     rng = visitor_gen_rng(cfg.evaluation_seed)
+    # 既存の到着・プロファイル・興味・テーブル選好を変えないよう、
+    # ゴミステーション用の乱数は独立した系統4から生成する。
+    waste_rng = waste_behavior_rng(cfg.evaluation_seed)
     n = cfg.n_visitors
 
     # --- 入場時刻
@@ -88,6 +93,8 @@ def generate_visitor_table(cfg: Config) -> tuple:
                 distance_weight_factor=prof.distance_weight_factor,
                 interests=tuple(float(v) for v in interests),
                 table_after_food_propensity=float(rng.random()),
+                general_waste_propensity=float(waste_rng.random()),
+                food_waste_propensity=float(waste_rng.random()),
                 is_passerby=bool(prof.passerby),
             )
         )
@@ -109,6 +116,8 @@ def instantiate_visitors(records: tuple) -> list:
             distance_weight_factor=r.distance_weight_factor,
             profile_name=r.profile_name,
             table_after_food_propensity=getattr(r, "table_after_food_propensity", 1.0),
+            general_waste_propensity=getattr(r, "general_waste_propensity", 1.0),
+            food_waste_propensity=getattr(r, "food_waste_propensity", 1.0),
             is_passerby=bool(getattr(r, "is_passerby", False)),
             state=NOT_ARRIVED,
         )

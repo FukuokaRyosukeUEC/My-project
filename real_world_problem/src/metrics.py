@@ -126,6 +126,24 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
     table_visits = int(sum(v.table_visit_count for v in spawned))
     food_table_requests = int(sum(v.table_requests_after_food for v in spawned))
     food_table_visits = int(sum(v.food_table_visit_count for v in spawned))
+    waste_station_requests = int(
+        sum(v.waste_station_request_count for v in spawned)
+    )
+    waste_station_visits = int(
+        sum(v.waste_station_visit_count for v in spawned)
+    )
+    waste_station_giveups = int(
+        sum(v.waste_station_give_up_count for v in spawned)
+    )
+    food_waste_opportunities = int(
+        sum(v.food_waste_opportunity_count for v in spawned)
+    )
+    food_waste_requests = int(
+        sum(v.food_waste_request_count for v in spawned)
+    )
+    food_waste_visits = int(
+        sum(v.food_waste_visit_count for v in spawned)
+    )
     table_capacity = int(sum(b.capacity for b in cfg.booths if b.is_table))
     table_capacity_seconds = max(
         1.0, table_capacity * max(1, sim.executed_steps) * cfg.dt_seconds
@@ -184,6 +202,29 @@ def compute_metrics(sim) -> tuple[float, float, dict]:
         "food_table_visit_total": food_table_visits,
         "food_table_followthrough_rate": (
             food_table_visits / food_table_requests if food_table_requests else 1.0
+        ),
+        # --- ゴミステーション利用
+        "waste_station_request_total": waste_station_requests,
+        "waste_station_visit_total": waste_station_visits,
+        "waste_station_give_up_total": waste_station_giveups,
+        "waste_station_user_rate": (
+            sum(v.waste_station_visit_count > 0 for v in spawned) / n_spawned
+            if n_spawned else 0.0
+        ),
+        "waste_station_followthrough_rate": (
+            waste_station_visits / waste_station_requests
+            if waste_station_requests else 1.0
+        ),
+        "food_waste_opportunity_total": food_waste_opportunities,
+        "food_waste_request_total": food_waste_requests,
+        "food_waste_visit_total": food_waste_visits,
+        "food_waste_request_rate": (
+            food_waste_requests / food_waste_opportunities
+            if food_waste_opportunities else 0.0
+        ),
+        "food_waste_followthrough_rate": (
+            food_waste_visits / food_waste_requests
+            if food_waste_requests else 1.0
         ),
 
         # --- 素通り客(広場を通り抜けるだけの通行人)
