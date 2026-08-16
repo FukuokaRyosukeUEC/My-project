@@ -116,7 +116,6 @@ class RunParams:
     donor_minimum_distance: float = 0.05
     donor_refresh_probability: float = 0.25
     minimum_layout_distance: float = 0.02
-    orderliness_tightening_generations: int = 40
     memetic_interval: int = 5
     memetic_start_generation: int = 30
     memetic_parents: int = 10
@@ -179,9 +178,6 @@ class RunParams:
             "donor_minimum_distance": float(self.donor_minimum_distance),
             "donor_refresh_probability": float(self.donor_refresh_probability),
             "minimum_layout_distance": float(self.minimum_layout_distance),
-            "orderliness_tightening_generations": int(
-                self.orderliness_tightening_generations
-            ),
             "memetic_interval": int(self.memetic_interval),
             "memetic_start_generation": int(self.memetic_start_generation),
             "memetic_parents": int(self.memetic_parents),
@@ -252,8 +248,6 @@ class RunParams:
         ):
             if not 0.0 <= float(value) <= 1.0:
                 raise ValueError(f"{name}は 0〜1 にしてください")
-        if int(self.orderliness_tightening_generations) < 1:
-            raise ValueError("整然性制約の移行世代数は 1 以上にしてください")
 
         limits = (
             self.max_organization_nonmembership,

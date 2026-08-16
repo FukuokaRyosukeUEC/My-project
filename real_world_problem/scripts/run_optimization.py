@@ -149,7 +149,7 @@ def main() -> None:
         "--mutation-individual-prob",
         type=float,
         default=0.20,
-        help="子個体に三段階突然変異を適用する確率(既定: 0.70)",
+        help="子個体に三段階突然変異を適用する確率(既定: 0.20)",
     )
     parser.add_argument(
         "--mutation-local-weight",
@@ -186,12 +186,6 @@ def main() -> None:
         type=float,
         default=0.02,
         help="環境選択で近似重複を後回しにする配置距離(既定: 0.02)",
-    )
-    parser.add_argument(
-        "--orderliness-tightening-generations",
-        type=int,
-        default=40,
-        help="緩和整然性制約から最終上限へ移行する世代数(既定: 40)",
     )
     parser.add_argument(
         "--memetic-interval",
@@ -240,8 +234,6 @@ def main() -> None:
         parser.error("--donor-pool-sizeは1以上にしてください")
     if not 0.0 <= args.minimum_layout_distance <= 1.0:
         parser.error("--minimum-layout-distanceは0以上1以下にしてください")
-    if args.orderliness_tightening_generations < 1:
-        parser.error("--orderliness-tightening-generationsは1以上にしてください")
     if args.memetic_start_generation < 1:
         parser.error("--memetic-start-generationは1以上にしてください")
     if min(args.memetic_interval, args.memetic_parents, args.memetic_neighbors) < 1:
@@ -273,9 +265,9 @@ def main() -> None:
         f"({args.mutation_local_weight:.2f}/"
         f"{args.mutation_meso_weight:.2f}/"
         f"{args.mutation_macro_weight:.2f}), "
-        f"exploration=1-{args.exploration_generations}世代は0.90×(0.20/0.30/0.50), "
+        f"exploration=1-{args.exploration_generations}世代は0.40×(0.20/0.30/0.50), "
         f"donors={args.donor_pool_size}, diversity={args.minimum_layout_distance:.3f}, "
-        f"orderliness_tightening={args.orderliness_tightening_generations}世代, "
+        "orderliness=fixed_from_generation_1, crossover=two_point_booth_block, "
         f"memetic={args.memetic_start_generation}世代以降"
         f"{args.memetic_interval}世代ごと×"
         f"{args.memetic_parents}非劣解×{args.memetic_neighbors}近傍"
@@ -305,9 +297,6 @@ def main() -> None:
             exploration_generations=args.exploration_generations,
             donor_pool_size=args.donor_pool_size,
             minimum_layout_distance=args.minimum_layout_distance,
-            orderliness_tightening_generations=(
-                args.orderliness_tightening_generations
-            ),
             memetic_interval=args.memetic_interval,
             memetic_start_generation=args.memetic_start_generation,
             memetic_parents=args.memetic_parents,

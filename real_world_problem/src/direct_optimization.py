@@ -104,88 +104,8 @@ class OrderlinessLimits:
     def scaled(self, factor: float) -> "OrderlinessLimits":
         if factor < 0.0:
             raise ValueError("orderliness limit scale must be non-negative")
-        values = {
-            key: value * factor
-            for key, value in self.as_dict().items()
-        }
+        values = {key: value * factor for key, value in self.as_dict().items()}
         return OrderlinessLimits(**values)
-
-
-@dataclass(frozen=True)
-class ProgressiveOrderlinessSchedule:
-    """完全ランダム初期集団から最終整然性制約へ線形に移行する。"""
-
-    final_limits: OrderlinessLimits
-    tightening_generations: int = 40
-    relaxed_organization_nonmembership: float = 1.0
-    relaxed_motif_complexity: float = 1.50
-    relaxed_alignment_error: float = 1.0
-    relaxed_gap_variation: float = 1.0
-    relaxed_orientation: float = 1.0
-    relaxed_isolation: float = 1.0
-    relaxed_front_clearance: float = 0.10
-
-    def __post_init__(self) -> None:
-        if int(self.tightening_generations) < 1:
-            raise ValueError("tightening_generations must be at least 1")
-
-    def relaxed_limits(self) -> OrderlinessLimits:
-        """最終上限より緩く、ランダム配置も評価可能な開始上限を返す。"""
-        final = self.final_limits.as_dict()
-        return OrderlinessLimits(
-            organization_nonmembership=max(
-                final["organization_nonmembership"],
-                float(self.relaxed_organization_nonmembership),
-            ),
-            motif_complexity=max(
-                final["motif_complexity"], float(self.relaxed_motif_complexity)
-            ),
-            alignment_error=max(
-                final["alignment_error"], float(self.relaxed_alignment_error)
-            ),
-            gap_variation=max(
-                final["gap_variation"], float(self.relaxed_gap_variation)
-            ),
-            orientation=max(
-                final["orientation"], float(self.relaxed_orientation)
-            ),
-            isolation=max(final["isolation"], float(self.relaxed_isolation)),
-            front_clearance=max(
-                final["front_clearance"], float(self.relaxed_front_clearance)
-            ),
-        )
-
-    def progress(self, generation: int) -> float:
-        """第1世代を0、締切世代を1とする制約適用率。"""
-        if self.tightening_generations <= 1:
-            return 1.0
-        return float(
-            np.clip(
-                (int(generation) - 1) / (int(self.tightening_generations) - 1),
-                0.0,
-                1.0,
-            )
-        )
-
-    def limits_at(self, generation: int) -> OrderlinessLimits:
-        ratio = self.progress(generation)
-        start = self.relaxed_limits().as_dict()
-        final = self.final_limits.as_dict()
-        return OrderlinessLimits(
-            **{
-                key: (1.0 - ratio) * start[key] + ratio * final[key]
-                for key in final
-            }
-        )
-
-    def as_dict(self) -> dict:
-        return {
-            "enabled": True,
-            "tightening_generations": int(self.tightening_generations),
-            "start_limits": self.relaxed_limits().as_dict(),
-            "final_limits": self.final_limits.as_dict(),
-            "interpolation": "linear_by_generation",
-        }
 
 
 def normalized_layout_distance(cfg: Config, first, second) -> float:
@@ -1776,13 +1696,20 @@ def _initial_individual_task(
     return int(individual_index), sampler._do(problem, 1)[0]
 
 
-class DirectAreaCrossover(Crossover):
-    """上部/下部エリアを意味単位で交換する整数交叉。"""
+class DirectTwoPointCrossover(Crossover):
+    """ブース遺伝子ブロックを分断しない2点交叉。"""
 
     def __init__(self, cfg: Config, prob: float = 0.90) -> None:
         super().__init__(2, 2, prob=prob)
         self.cfg = cfg
-        self.areas = tuple(sorted({str(booth.area) for booth in cfg.booths}))
+        self.booth_slices = tuple(
+            slice(
+                booth_variable_indices(cfg, booth_id)[0],
+                booth_variable_indices(cfg, booth_id)[0]
+                + (2 if booth.is_table else 3),
+            )
+            for booth_id, booth in enumerate(cfg.booths)
+        )
 
     def _do(self, problem, X, random_state=None, **kwargs):
         rng = random_state if random_state is not None else np.random.default_rng()
@@ -1792,22 +1719,34 @@ class DirectAreaCrossover(Crossover):
             first = np.rint(X[0, mating]).astype(np.int64)
             second = np.rint(X[1, mating]).astype(np.int64)
             child_first, child_second = first.copy(), second.copy()
-            selected_area = str(rng.choice(self.areas))
-            for booth_id, booth in enumerate(self.cfg.booths):
-                if str(booth.area) != selected_area:
-                    continue
-                x_index, _, theta_index = booth_variable_indices(self.cfg, booth_id)
-                sl = slice(x_index, x_index + (2 if theta_index is None else 3))
+
+            n_booths = len(self.booth_slices)
+            if n_booths >= 3:
+                # 切断点はブース間に置く。通常ブース(x,y,theta)や
+                # テーブル(x,y)の途中で親を混ぜない。
+                cut_first, cut_second = sorted(
+                    int(value)
+                    for value in rng.choice(
+                        np.arange(1, n_booths), size=2, replace=False
+                    )
+                )
+            elif n_booths == 2:
+                # 内部境界が1つしかない縮小問題では、1ブース区間を交換する。
+                cut_first = int(rng.integers(0, 2))
+                cut_second = cut_first + 1
+            else:
+                cut_first = cut_second = 0
+
+            for sl in self.booth_slices[cut_first:cut_second]:
                 child_first[sl] = second[sl]
                 child_second[sl] = first[sl]
-            # 物理制約を壊した場合だけ親へ戻す。整然さ制約は制約付き選択に委ね、
-            # 完全ランダム初期集団から段階的に改善できるようにする。
+
+            # 交叉では物理的に配置可能かだけを確認する。整然性制約は
+            # 第1世代から固定上限で評価し、制約付き環境選択へ委ねる。
             for child, parent in (
                 (child_first, first),
                 (child_second, second),
             ):
-                # 交叉で必要なのは物理的に配置可能かだけ。整然性は評価時の
-                # G/CVと生存選択で扱うため、ここでは高価なモチーフ検出をしない。
                 physical = problem.physical_violation(child)
                 if physical > 0.0:
                     child[:] = parent
@@ -2279,7 +2218,6 @@ class DirectMemeticNSGA2(NSGA2):
         n_nondominated_parents: int = 10,
         n_neighbors_per_parent: int = 10,
         max_neighbor_trials: int = 1000,
-        constraint_schedule: ProgressiveOrderlinessSchedule | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -2298,87 +2236,7 @@ class DirectMemeticNSGA2(NSGA2):
         self.n_neighbors_per_parent = int(n_neighbors_per_parent)
         self.max_neighbor_trials = int(max_neighbor_trials)
         self.memetic_history: list[dict[str, int]] = []
-        self.constraint_schedule = constraint_schedule
-        self.constraint_schedule_history: list[dict] = []
         self._memetic_rng: np.random.Generator | None = None
-
-    @staticmethod
-    def _same_limits(first: OrderlinessLimits, second: OrderlinessLimits) -> bool:
-        return bool(
-            np.allclose(
-                list(first.as_dict().values()),
-                list(second.as_dict().values()),
-                rtol=0.0,
-                atol=1.0e-12,
-            )
-        )
-
-    def _record_constraint_schedule(self, generation: int) -> None:
-        if self.constraint_schedule is None:
-            return
-        self.constraint_schedule_history.append(
-            {
-                "generation": int(generation),
-                "progress": float(self.constraint_schedule.progress(generation)),
-                **{
-                    f"limit_{key}": float(value)
-                    for key, value in self.problem.orderliness_limits.as_dict().items()
-                },
-            }
-        )
-
-    def _apply_constraint_schedule(self, generation: int) -> None:
-        """上限を更新し、親集団のG/CVとrankを現在世代基準へ更新する。"""
-        if self.constraint_schedule is None:
-            return
-        new_limits = self.constraint_schedule.limits_at(generation)
-        if self._same_limits(self.problem.orderliness_limits, new_limits):
-            return
-        self.problem.set_orderliness_limits(new_limits)
-        if self.pop is not None and len(self.pop):
-            for individual in self.pop:
-                # 整然性の各生値は上限に依存しない。評価時に個体へ保存した
-                # 生値を使い、現在上限との差だけを更新する。
-                previous = individual.get("orderliness")
-                previous_g = individual.get("G")
-                if previous is not None and previous_g is not None:
-                    raw = _raw_orderliness(previous)
-                    orderliness = _materialize_orderliness(raw, new_limits)
-                    constraints = np.asarray(
-                        [
-                            float(raw[name]) - limit
-                            for name, limit in new_limits.as_dict().items()
-                        ],
-                        dtype=float,
-                    )
-                    physical = float(np.asarray(previous_g, dtype=float).reshape(-1)[0])
-                else:
-                    physical, constraints, orderliness = (
-                        self.problem.constraint_components(individual.X)
-                    )
-                individual.set(
-                    "G",
-                    np.asarray([physical, *constraints.tolist()], dtype=float),
-                )
-                individual.set("CV", None)
-                individual.set("orderliness", orderliness)
-            # トーナメント選択が古いrank/crowdingを参照しないよう再選択する。
-            self.pop = self.survival.do(
-                self.problem,
-                self.pop,
-                n_survive=min(self.pop_size, len(self.pop)),
-                algorithm=self,
-                random_state=self.random_state,
-            )
-        self._record_constraint_schedule(generation)
-
-    def _initialize_advance(self, infills=None, **kwargs) -> None:
-        super()._initialize_advance(infills=infills, **kwargs)
-        self._record_constraint_schedule(int(self.n_gen or 1))
-
-    def _infill(self):
-        self._apply_constraint_schedule(int(self.n_gen or 1))
-        return super()._infill()
 
     def _rng(self) -> np.random.Generator:
         """pymoo 0.6.1.x の細かなAPI差を避けた専用乱数器を返す。"""
@@ -2579,8 +2437,7 @@ def run_direct_nsga2(
     donor_pool_size: int = 32,
     donor_minimum_distance: float = 0.05,
     donor_refresh_probability: float = 0.25,
-    minimum_layout_distance: float = 0.02,
-    orderliness_tightening_generations: int = 40,
+    minimum_layout_distance: float = 0.05,
     memetic_interval: int = 5,
     memetic_start_generation: int = 30,
     memetic_parents: int = 10,
@@ -2599,23 +2456,15 @@ def run_direct_nsga2(
         max_orderliness=max_orderliness,
         **kwargs,
     )
-    final_limits = problem.orderliness_limits
     effective_n_gen = int(n_gen or cfg.n_generations)
-    constraint_schedule = ProgressiveOrderlinessSchedule(
-        final_limits=final_limits,
-        tightening_generations=min(
-            max(1, int(orderliness_tightening_generations)),
-            effective_n_gen,
-        ),
-    )
-    # 初期集団の評価前から緩和上限を有効にする。最終世代では必ずfinalへ戻る。
-    problem.set_orderliness_limits(constraint_schedule.limits_at(1))
+    # 指定された整然性上限を第1世代から最終世代まで固定して使用する。
+    fixed_limits = problem.orderliness_limits
     if initial_genotypes is None:
         sampling = prepare_random_feasible_direct_population(
             cfg,
             pop_size=int(pop_size or cfg.population_size),
             seed=seed,
-            orderliness_limits=problem.orderliness_limits,
+            orderliness_limits=fixed_limits,
             initial_max_trials=initial_max_trials,
         )
     else:
@@ -2634,14 +2483,13 @@ def run_direct_nsga2(
         n_nondominated_parents=memetic_parents,
         n_neighbors_per_parent=memetic_neighbors,
         max_neighbor_trials=memetic_max_neighbor_trials,
-        constraint_schedule=constraint_schedule,
         pop_size=int(pop_size or cfg.population_size),
         sampling=sampling,
         survival=DirectDiversitySurvival(
             cfg,
             minimum_layout_distance=minimum_layout_distance,
         ),
-        crossover=DirectAreaCrossover(cfg, prob=0.90),
+        crossover=DirectTwoPointCrossover(cfg, prob=0.90),
         mutation=DirectMultiScaleMutation(
             cfg,
             individual_prob=mutation_individual_prob,
@@ -2678,7 +2526,7 @@ def run_direct_nsga2(
         compute_direct_orderliness(
             cfg,
             x,
-            limits=final_limits,
+            limits=fixed_limits,
             venue=problem.venue,
         )
         for x in designs
@@ -2687,7 +2535,7 @@ def run_direct_nsga2(
         [item["total"] for item in components], dtype=float
     )
     result.orderliness_components = components
-    result.orderliness_limits = final_limits
+    result.orderliness_limits = fixed_limits
     result.mutation_settings = {
         "exploration_phase": {
             "through_generation": int(exploration_generations),
@@ -2718,10 +2566,7 @@ def run_direct_nsga2(
     # minimize() は既定で algorithm を deepcopy して実行するため、実行履歴は
     # result.algorithm から回収する（元の algorithm は空のまま）。
     result.memetic_history = list(result.algorithm.memetic_history)
-    result.constraint_schedule = constraint_schedule
-    result.constraint_schedule_history = list(
-        result.algorithm.constraint_schedule_history
-    )
+    result.orderliness_constraint_mode = "fixed_from_first_generation"
     result.diversity_settings = {
         "minimum_layout_distance": float(minimum_layout_distance),
         "distance": "mean_booth_displacement_and_orientation_difference",
@@ -2818,9 +2663,6 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
     pd.DataFrame(result.mutation_history).to_csv(
         output / "mutation_history.csv", index=False, encoding="utf-8-sig"
     )
-    pd.DataFrame(result.constraint_schedule_history).to_csv(
-        output / "orderliness_schedule_history.csv", index=False, encoding="utf-8-sig"
-    )
     pd.DataFrame(result.diversity_history).to_csv(
         output / "layout_diversity_history.csv", index=False, encoding="utf-8-sig"
     )
@@ -2828,6 +2670,13 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
         "method": f"single_level_direct_{designs.shape[1]}_layout_nsga2",
         "n_genes": int(designs.shape[1]),
         "encoding": "active booth=(x,y,theta), table=(x,y)",
+        "crossover": {
+            "type": "booth_block_two_point",
+            "probability": 0.90,
+            "cut_points": "between_booths",
+            "preserves_booth_gene_blocks": True,
+            "invalid_offspring": "revert_to_corresponding_parent",
+        },
         "orderliness_limits": result.orderliness_limits.as_dict(),
         "initialization": "uniform_random_xy_and_active_booth_orientation_physical_feasible_only",
         "uses_fixed_position_for_initialization": False,
@@ -2853,7 +2702,10 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
         },
         "mutation": result.mutation_settings,
         "memetic": result.memetic_settings,
-        "progressive_orderliness": result.constraint_schedule.as_dict(),
+        "orderliness_constraint_application": {
+            "mode": result.orderliness_constraint_mode,
+            "limits": result.orderliness_limits.as_dict(),
+        },
         "layout_diversity": result.diversity_settings,
         "donor_pool_final_size": int(result.donor_pool_final_size),
         "exact_speedups": {
