@@ -184,11 +184,30 @@ class DirectDiversitySurvival(Survival):
         **kwargs,
     ):
         n_survive = min(int(n_survive or len(pop)), len(pop))
+        if len(pop) == 0:
+            return pop
         rng = random_state if random_state is not None else np.random.default_rng()
         # FEASは物理＋1セル幅到達性だけを表す。4セル幅達成ブース数は
         # ハード制約にせず、この環境選択で辞書式に最優先する。
-        feasible = np.where(np.asarray(pop.get("FEAS"), dtype=bool).reshape(-1))[0]
-        infeasible = np.where(~np.asarray(pop.get("FEAS"), dtype=bool).reshape(-1))[0]
+        raw_cv = np.asarray(pop.get("CV"), dtype=float).reshape(-1)
+        if raw_cv.size == len(pop):
+            cv = raw_cv
+        else:
+            # 評価属性が欠落した個体を実行可能扱いにはしない。ただしCVを空のまま
+            # 返すとpymooの進捗表示がmin()できないため、有限の違反値を補う。
+            cv = np.full(len(pop), float(PENALTY_OBJECTIVE), dtype=float)
+            for individual in pop:
+                individual.set(
+                    "CV",
+                    np.asarray([PENALTY_OBJECTIVE], dtype=float),
+                )
+        feasible_mask = np.asarray(pop.get("FEAS"), dtype=bool).reshape(-1)
+        if feasible_mask.size != len(pop):
+            # pymoo側でFEASが未生成・空配列だった場合も、CVから安全に復元する。
+            # ここで候補集合を空にするとdisplayのcv_minでzero-size例外になる。
+            feasible_mask = np.isfinite(cv) & (cv <= 0.0)
+        feasible = np.where(feasible_mask)[0]
+        infeasible = np.where(~feasible_mask)[0]
         raw_width4 = pop.get("width4_achievement_count")
         width4_counts = (
             np.zeros(len(pop), dtype=np.int64)
@@ -218,7 +237,6 @@ class DirectDiversitySurvival(Survival):
         else:
             feasible_priority = []
 
-        cv = np.asarray(pop.get("CV"), dtype=float).reshape(-1)
         infeasible_tie = {int(index): float(rng.random()) for index in infeasible}
         infeasible_priority = sorted(
             (int(index) for index in infeasible),
@@ -277,6 +295,45 @@ class DirectDiversitySurvival(Survival):
             if len(selected) >= n_survive:
                 break
 
+        # 評価属性の欠落などがあっても、非空の候補集団から空の生存集団を返さない。
+        # 通常は上のpriority_groupsだけで必ずn_survive件に達する。
+        if len(selected) < n_survive:
+            selected_set = set(selected)
+            remaining = [index for index in range(len(pop)) if index not in selected_set]
+            remaining.sort(
+                key=lambda index: (
+                    float(cv[index]) if np.isfinite(cv[index]) else float("inf"),
+                    int(index),
+                )
+            )
+            selected.extend(remaining[: n_survive - len(selected)])
+
+        survivor_indices = np.asarray(selected, dtype=np.int64)
+        survivors = pop[survivor_indices]
+
+        # 4セル幅達成数をPareto rankより優先すると、統合前集団のrankをそのまま
+        # 次世代へ持ち越すことはできない。環境選択の結果は変えず、生存個体だけを
+        # 母集団としてrank/crowdingを付け直して次世代へ渡す。
+        survivor_feasible = np.asarray(
+            survivors.get("FEAS"),
+            dtype=bool,
+        ).reshape(-1)
+        if survivor_feasible.size != len(survivors):
+            survivor_cv = np.asarray(survivors.get("CV"), dtype=float).reshape(-1)
+            survivor_feasible = (
+                np.isfinite(survivor_cv) & (survivor_cv <= 0.0)
+                if survivor_cv.size == len(survivors)
+                else np.zeros(len(survivors), dtype=bool)
+            )
+        if np.any(survivor_feasible):
+            self.ranking.do(
+                problem,
+                survivors[survivor_feasible],
+                n_survive=int(np.count_nonzero(survivor_feasible)),
+                random_state=rng,
+                **kwargs,
+            )
+
         for index in selected:
             value = minimum_distances.get(index, float("nan"))
             pop[index].set("layout_novelty", value)
@@ -302,7 +359,7 @@ class DirectDiversitySurvival(Survival):
                 ),
             }
         )
-        return pop[np.asarray(selected, dtype=np.int64)]
+        return survivors
 
 
 @dataclass(frozen=True)
@@ -1287,10 +1344,14 @@ class Direct138LayoutProblem(ElementwiseProblem):
             positions,
             collect_time_series=False,
         )
-        if simulation.timed_out:
+        objectives = np.asarray(
+            [simulation.f_move, simulation.f_congestion],
+            dtype=float,
+        )
+        if simulation.timed_out or not np.all(np.isfinite(objectives)):
             out["F"] = [PENALTY_OBJECTIVE, PENALTY_OBJECTIVE]
         else:
-            out["F"] = [simulation.f_move, simulation.f_congestion]
+            out["F"] = objectives.tolist()
         out["G"] = all_constraints
         out["kpis"] = simulation.kpis
         out["orderliness"] = orderliness

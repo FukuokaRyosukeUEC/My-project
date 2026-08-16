@@ -8,7 +8,7 @@
   サイドバー : 入力(会場・ブース・エージェント・時間・世代数・個体数)
   上段       : 進捗(2 秒ごとに自動更新)
   下段       : 世代スライダ + パレート図(クリックで解を選択)
-               → 選択解のレイアウト図 / ヒートマップ / アニメーション
+               → 選択解のレイアウト図 / 歩行可能通路 / ヒートマップ / アニメーション
 
 最適化そのものは ui/optimize_worker.py が別プロセスで回す。
 この画面はファイル(runs/<run_id>/)を読むだけなので、
@@ -65,6 +65,20 @@ def cached_layout_png(config_dir: str, x: tuple, out_dir: str) -> str:
     path = Path(out_dir) / f"layout_{render.design_key(x)}_v{render.RENDER_VERSION}.png"
     if not path.exists():
         render.render_layout(cfg, ctx, x, path)
+    return str(path)
+
+
+@st.cache_data(show_spinner=False)
+def cached_walkable_png(config_dir: str, x: tuple, out_dir: str) -> str:
+    """選択解の配置に実際の歩行可能セルを重ねた図をキャッシュする。"""
+    cfg = get_config(config_dir)
+    ctx = get_viz_context(config_dir)
+    path = (
+        Path(out_dir)
+        / f"walkable_{render.design_key(x)}_v{render.RENDER_VERSION}.png"
+    )
+    if not path.exists():
+        render.render_walkable_corridors(cfg, ctx, x, path)
     return str(path)
 
 
@@ -954,13 +968,22 @@ def solution_panel(
             "この配置は現在の設定では配置制約を満たしていません(参考値)。"
         )
 
-    tab_layout, tab_heat, tab_anim = st.tabs(
-        ["会場レイアウト図", "混雑ヒートマップ", "エージェント動画"]
+    tab_layout, tab_walkable, tab_heat, tab_anim = st.tabs(
+        ["会場レイアウト図", "歩行可能通路", "混雑ヒートマップ", "エージェント動画"]
     )
 
     with tab_layout:
         with st.spinner("レイアウトを描画中..."):
             st.image(cached_layout_png(config_dir, x, cache_dir))
+
+    with tab_walkable:
+        st.caption(
+            "青色の半透明セルが、この配置で実際にエージェントの移動に使える"
+            "歩行可能セルです。各ブースへの通路幅は 4→3→2→1 セルの順で"
+            "確保された結果を表示します。"
+        )
+        with st.spinner("歩行可能通路を描画中..."):
+            st.image(cached_walkable_png(config_dir, x, cache_dir))
 
     with tab_heat:
         st.caption(
