@@ -1,6 +1,7 @@
 """venue.py — 会場グリッド・セル種別・容量・入口出口・レイアウト適用(§4, §5)。"""
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,6 +23,9 @@ THETA_NORTH = 0
 THETA_EAST = 1
 THETA_SOUTH = 2
 THETA_WEST = 3
+
+# UI項目は追加せず、環境選択と経路割当で評価する最大通路幅を4セルに固定する。
+TARGET_CORRIDOR_WIDTH_CELLS = 4
 
 VALID_THETAS = (
     THETA_NORTH,
@@ -645,10 +649,180 @@ def passable_corridor_mask(
     return passable
 
 
+def _reachable_cells(mask: np.ndarray, sources) -> np.ndarray:
+    """4近傍でsourcesから到達できるセルをbool配列で返す。"""
+
+    height, width = mask.shape
+    reached = np.zeros_like(mask, dtype=bool)
+    queue: deque[tuple[int, int]] = deque()
+    for x_pos, y_pos in sources:
+        x_pos, y_pos = int(x_pos), int(y_pos)
+        if (
+            0 <= x_pos < width
+            and 0 <= y_pos < height
+            and mask[y_pos, x_pos]
+            and not reached[y_pos, x_pos]
+        ):
+            reached[y_pos, x_pos] = True
+            queue.append((x_pos, y_pos))
+    while queue:
+        x_pos, y_pos = queue.popleft()
+        for next_x, next_y in (
+            (x_pos + 1, y_pos),
+            (x_pos - 1, y_pos),
+            (x_pos, y_pos + 1),
+            (x_pos, y_pos - 1),
+        ):
+            if (
+                0 <= next_x < width
+                and 0 <= next_y < height
+                and mask[next_y, next_x]
+                and not reached[next_y, next_x]
+            ):
+                reached[next_y, next_x] = True
+                queue.append((next_x, next_y))
+    return reached
+
+
+def _bfs_tree(
+    walkable: np.ndarray,
+    sources,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """指定マスク上の距離と最短路復元用の親座標を作る。"""
+
+    height, width = walkable.shape
+    distance = np.full((height, width), -1, dtype=np.int32)
+    parent_x = np.full((height, width), -1, dtype=np.int32)
+    parent_y = np.full((height, width), -1, dtype=np.int32)
+    queue: deque[tuple[int, int]] = deque()
+    for x_pos, y_pos in sources:
+        x_pos, y_pos = int(x_pos), int(y_pos)
+        if (
+            0 <= x_pos < width
+            and 0 <= y_pos < height
+            and walkable[y_pos, x_pos]
+            and distance[y_pos, x_pos] < 0
+        ):
+            distance[y_pos, x_pos] = 0
+            parent_x[y_pos, x_pos] = x_pos
+            parent_y[y_pos, x_pos] = y_pos
+            queue.append((x_pos, y_pos))
+    while queue:
+        x_pos, y_pos = queue.popleft()
+        next_distance = int(distance[y_pos, x_pos]) + 1
+        for next_x, next_y in (
+            (x_pos + 1, y_pos),
+            (x_pos - 1, y_pos),
+            (x_pos, y_pos + 1),
+            (x_pos, y_pos - 1),
+        ):
+            if (
+                0 <= next_x < width
+                and 0 <= next_y < height
+                and walkable[next_y, next_x]
+                and distance[next_y, next_x] < 0
+            ):
+                distance[next_y, next_x] = next_distance
+                parent_x[next_y, next_x] = x_pos
+                parent_y[next_y, next_x] = y_pos
+                queue.append((next_x, next_y))
+    return distance, parent_x, parent_y
+
+
+def augment_walkable_with_hierarchical_widths(
+    raw_walkable: np.ndarray,
+    entrance_cells,
+    exit_cells,
+    receptions,
+    booth_exits,
+    table_access_cells,
+) -> np.ndarray:
+    """各対象へ4→3→2→1セルの順で最も広い到達経路を割り当てる。"""
+
+    raw = np.asarray(raw_walkable, dtype=bool)
+    widths = tuple(range(TARGET_CORRIDOR_WIDTH_CELLS, 0, -1))
+    masks = {
+        width: passable_corridor_mask(raw, width)
+        for width in widths
+    }
+    entrance_trees = {
+        width: _bfs_tree(masks[width], entrance_cells)
+        for width in widths
+    }
+    exit_trees = {
+        width: _bfs_tree(masks[width], exit_cells)
+        for width in widths
+    }
+    walkable = masks[TARGET_CORRIDOR_WIDTH_CELLS].copy()
+
+    def add_widest_path(target, trees) -> int:
+        """targetへ到達できる最も広い経路をwalkableへ追加し、その幅を返す。"""
+
+        target_x, target_y = int(target[0]), int(target[1])
+        selected_width = 0
+        selected_tree = None
+        for width in widths:
+            tree = trees[width]
+            if tree[0][target_y, target_x] >= 0:
+                selected_width = width
+                selected_tree = tree
+                break
+        if selected_tree is None:
+            return 0
+        if selected_width == TARGET_CORRIDOR_WIDTH_CELLS:
+            return selected_width
+        _, parent_x, parent_y = selected_tree
+        x_pos, y_pos = target_x, target_y
+        while True:
+            walkable[y_pos, x_pos] = True
+            next_x = int(parent_x[y_pos, x_pos])
+            next_y = int(parent_y[y_pos, x_pos])
+            if next_x == x_pos and next_y == y_pos:
+                break
+            if next_x < 0 or next_y < 0:
+                break
+            x_pos, y_pos = next_x, next_y
+        return selected_width
+
+    # 入口から少なくとも1つの会場出口へ、可能な限り広い経路を確保する。
+    best_exit = None
+    best_exit_width = 0
+    best_exit_distance = np.iinfo(np.int32).max
+    for exit_cell in exit_cells:
+        exit_x, exit_y = int(exit_cell[0]), int(exit_cell[1])
+        for width in widths:
+            distance = int(entrance_trees[width][0][exit_y, exit_x])
+            if distance >= 0:
+                if width > best_exit_width or (
+                    width == best_exit_width and distance < best_exit_distance
+                ):
+                    best_exit = (exit_x, exit_y)
+                    best_exit_width = width
+                    best_exit_distance = distance
+                break
+    if best_exit is not None:
+        add_widest_path(best_exit, entrance_trees)
+
+    for cell in receptions:
+        if cell is not None:
+            add_widest_path(cell, entrance_trees)
+
+    for accesses in table_access_cells:
+        for cell in accesses:
+            add_widest_path(cell, entrance_trees)
+
+    for cell in booth_exits:
+        if cell is not None:
+            add_widest_path(cell, exit_trees)
+
+    return walkable
+
+
 def apply_layout(
     cfg: Config,
     venue: Venue,
     positions: tuple,
+    include_narrow_fallbacks: bool = True,
 ) -> Layout:
     """有効な ``((x, y, theta), ...)`` 配置をグリッドへ適用する。"""
     grid = venue.base_grid.copy()
@@ -719,11 +893,23 @@ def apply_layout(
     if not cfg.queue_walkable:
         raw_walkable[grid == QUEUE] = False
 
-    # 最低幅を満たさない隙間は、配置違反として数えるだけでなく実際の
-    # 経路探索からも除外する。これにより1～3セル幅の通路を歩かない。
-    walkable = passable_corridor_mask(
+    four_cell_walkable = passable_corridor_mask(
         raw_walkable,
-        cfg.min_corridor_width,
+        TARGET_CORRIDOR_WIDTH_CELLS,
+    )
+    # シミュレーションは4セル幅を基本とし、対象ごとに3→2→1セル幅へ
+    # 段階的に下げた最短経路を追加する。制約計算時は経路復元を省略できる。
+    walkable = (
+        augment_walkable_with_hierarchical_widths(
+            raw_walkable,
+            venue.entrance_cells,
+            venue.exit_cells,
+            receptions,
+            booth_exits,
+            table_access_cells,
+        )
+        if include_narrow_fallbacks
+        else four_cell_walkable
     )
 
     return Layout(

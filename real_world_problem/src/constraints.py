@@ -4,8 +4,9 @@
 - 項目 1〜5(幾何): 違反セル数を合算(重み 1)
 - 項目 6〜7(BFS 到達性): 違反件数 × 100
 
-最低通路幅4セルはシミュレーションの歩行可能セルにだけ適用し、
-初期個体生成・配置制約の違反量 g には一切含めない。
+初期個体生成・遺伝的操作の必須物理制約には1セル幅到達性を使う。
+4セル幅で到達できるブース数は別の特徴値としてNSGA-IIの環境選択へ渡し、
+到達不能ブースは3→2→1セル幅の順で最大到達幅を判定する。
 有効配置は g = 0。無効配置はシミュレーションを実行しない。
 """
 from __future__ import annotations
@@ -24,6 +25,8 @@ from .venue import (
     queue_cells_of,
     reception_cell,
     table_access_cells_of,
+    passable_corridor_mask,
+    TARGET_CORRIDOR_WIDTH_CELLS,
     VALID_THETAS,
 )
 
@@ -286,7 +289,12 @@ def compute_violation(
         return g  # 幾何違反があれば到達性チェックは行わない(高速化)
 
     # --- 有効な幾何配置についてグリッドを構築し、項目 6〜7 を検査
-    layout = apply_layout(cfg, venue, positions)
+    layout = apply_layout(
+        cfg,
+        venue,
+        positions,
+        include_narrow_fallbacks=False,
+    )
 
     # 配置制約と初期個体生成には、4セル幅処理前の従来マスクを使う。
     # layout.walkable はシミュレーション専用で、ここでは参照しない。
@@ -326,6 +334,98 @@ def compute_violation(
             g += REACHABILITY_PENALTY
 
     return g
+
+
+def compute_width_reachability_profile(
+    cfg: Config,
+    venue: Venue,
+    positions: tuple,
+    geometry: PlacementGeometry | None = None,
+) -> dict[str, object]:
+    """各ブースへ到達できる最大通路幅（4/3/2/1）を返す。
+
+    通常ブースは入口側受付と退出側セルの狭い方、テーブルは周囲アクセス
+    セルのうち最も広く到達できるセルを、そのブースの到達幅とする。
+    """
+
+    geom = geometry or build_placement_geometry(cfg, positions)
+    layout = apply_layout(
+        cfg,
+        venue,
+        positions,
+        include_narrow_fallbacks=False,
+    )
+    widths = tuple(range(TARGET_CORRIDOR_WIDTH_CELLS, 0, -1))
+    entrance_fields = {}
+    exit_fields = {}
+    for width in widths:
+        mask = passable_corridor_mask(layout.raw_walkable, width)
+        entrance_fields[width] = bfs_distance_field(mask, venue.entrance_cells)
+        exit_fields[width] = bfs_distance_field(mask, venue.exit_cells)
+
+    def widest(cell, fields) -> int:
+        if cell is None:
+            return 0
+        x_pos, y_pos = cell
+        for width in widths:
+            if fields[width][y_pos, x_pos] < INF_DIST:
+                return width
+        return 0
+
+    booth_widths: list[int] = []
+    for booth_id, booth in enumerate(cfg.booths):
+        if booth.is_table:
+            access_widths = [
+                widest(cell, entrance_fields)
+                for cell in geom.table_access_cells[booth_id]
+            ]
+            booth_widths.append(max(access_widths, default=0))
+        else:
+            reception_width = widest(geom.receptions[booth_id], entrance_fields)
+            exit_width = widest(geom.booth_exits[booth_id], exit_fields)
+            booth_widths.append(min(reception_width, exit_width))
+
+    achieved_counts = {
+        width: int(sum(value >= width for value in booth_widths))
+        for width in widths
+    }
+    exact_counts = {
+        width: int(sum(value == width for value in booth_widths))
+        for width in widths
+    }
+    return {
+        "target_width": int(TARGET_CORRIDOR_WIDTH_CELLS),
+        "required_booth_count": int(len(cfg.booths)),
+        "booth_widths": tuple(int(value) for value in booth_widths),
+        "achieved_counts": achieved_counts,
+        "exact_counts": exact_counts,
+        "four_cell_achievement_count": int(
+            achieved_counts[TARGET_CORRIDOR_WIDTH_CELLS]
+        ),
+        "all_booths_one_cell_reachable": bool(
+            all(value >= 1 for value in booth_widths)
+        ),
+    }
+
+
+def compute_wide_reachability_violation(
+    cfg: Config,
+    venue: Venue,
+    positions: tuple,
+    geometry: PlacementGeometry | None = None,
+) -> float:
+    """後方互換用。4セル幅未達ブース数を返す（ハード制約にはしない）。"""
+
+    profile = compute_width_reachability_profile(
+        cfg,
+        venue,
+        positions,
+        geometry=geometry,
+    )
+    return float(
+        int(profile["required_booth_count"])
+        - int(profile["four_cell_achievement_count"])
+    )
 
 
 def compute_violation_vector(

@@ -3,8 +3,10 @@
 通常ブースは ``(x,y,theta)``、方向を持たないテーブルは ``(x,y)`` を染色体に
 保持する。本設定では28×3+18×2=120次元である。整然さは最終配置の
 幾何形状から計算した制約として扱う。初期集団はbooths.yamlを参照せず、
-位置・向きを一様乱数で決め、物理制約だけを満たす完全ランダム
-配置から生成する。整然さは初期化に埋め込まず、探索中の制約として扱う。
+位置・向きをランダム貪欲法で決め、幾何制約と1セル幅到達性を満たす
+配置から生成する。4セル幅で到達できるブース数を環境選択で最優先し、
+到達不能対象には3→2→1セル幅の順で経路を割り当てる。整然さ7成分は
+説明用特徴量として保存するだけで、ハード制約には使用しない。
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from .constraints import (
     booth_variable_indices,
     build_placement_geometry,
     compute_violation,
+    compute_width_reachability_profile,
     design_variable_count,
     positions_to_design,
     to_integer_layout,
@@ -39,7 +42,7 @@ from .optimization import (
     ObjectiveHistoryCallback,
     _booth_claimed_cells,
     _booth_fits,
-    sample_valid_layout,
+    _greedy_layout_attempt,
     variable_bounds,
 )
 from .parallel import PENALTY_OBJECTIVE, evaluate_layout, get_context
@@ -58,7 +61,7 @@ MAX_LANE_EDGE_GAP_CELLS = 6.0
 MIN_STRONG_LANE_SIZE = 3
 BOUNDARY_BAND_CELLS = 5.0
 BOUNDARY_ALIGNMENT_TOLERANCE_CELLS = 4.0
-MIN_BOUNDARY_CHAIN_SIZE = 2
+MIN_BOUNDARY_CHAIN_SIZE = 1
 MOTIF_TARGET_SIZE = 3
 FRONT_CLEARANCE_DEPTH_CELLS = 2
 CONSTRAINT_CACHE_MAXSIZE = 50_000
@@ -182,8 +185,16 @@ class DirectDiversitySurvival(Survival):
     ):
         n_survive = min(int(n_survive or len(pop)), len(pop))
         rng = random_state if random_state is not None else np.random.default_rng()
+        # FEASは物理＋1セル幅到達性だけを表す。4セル幅達成ブース数は
+        # ハード制約にせず、この環境選択で辞書式に最優先する。
         feasible = np.where(np.asarray(pop.get("FEAS"), dtype=bool).reshape(-1))[0]
         infeasible = np.where(~np.asarray(pop.get("FEAS"), dtype=bool).reshape(-1))[0]
+        raw_width4 = pop.get("width4_achievement_count")
+        width4_counts = (
+            np.zeros(len(pop), dtype=np.int64)
+            if raw_width4 is None
+            else np.rint(np.asarray(raw_width4, dtype=float).reshape(-1)).astype(np.int64)
+        )
 
         if feasible.size:
             # 全実行可能個体のrank/crowdingを付与してから優先順を作る。
@@ -198,6 +209,7 @@ class DirectDiversitySurvival(Survival):
             feasible_priority = sorted(
                 (int(index) for index in feasible),
                 key=lambda index: (
+                    -int(width4_counts[index]),
                     int(pop[index].get("rank")),
                     -self._crowding_value(pop[index]),
                     tie[index],
@@ -212,7 +224,6 @@ class DirectDiversitySurvival(Survival):
             (int(index) for index in infeasible),
             key=lambda index: (float(cv[index]), infeasible_tie[index]),
         )
-        priority = [*feasible_priority, *infeasible_priority]
         layout_distances = pairwise_normalized_layout_distances(
             self.cfg,
             pop.get("X"),
@@ -221,36 +232,50 @@ class DirectDiversitySurvival(Survival):
         selected: list[int] = []
         deferred: list[int] = []
         minimum_distances: dict[int, float] = {}
-        for index in priority:
-            if not selected:
-                minimum_distance = float("inf")
-            else:
-                minimum_distance = float(
-                    np.min(
-                        layout_distances[
-                            int(index),
-                            np.asarray(selected, dtype=np.int64),
-                        ]
-                    )
-                )
-            minimum_distances[index] = minimum_distance
-            if minimum_distance + 1.0e-12 >= self.minimum_layout_distance:
-                selected.append(index)
-                if len(selected) >= n_survive:
-                    break
-            else:
-                deferred.append(index)
+        priority_groups = [
+            [
+                index
+                for index in feasible_priority
+                if int(width4_counts[index]) == achievement
+            ]
+            for achievement in sorted(
+                {int(width4_counts[index]) for index in feasible_priority},
+                reverse=True,
+            )
+        ]
+        if infeasible_priority:
+            priority_groups.append(infeasible_priority)
 
-        # 閾値を満たす個体だけで定員に達しない場合も、集団サイズは必ず維持する。
-        if len(selected) < n_survive:
-            selected_set = set(selected)
-            for index in [*deferred, *priority]:
-                if index in selected_set:
-                    continue
+        # 達成数の高い群をすべて処理してから次の群へ進む。同じ達成数の中だけ
+        # NSGA-II rank/crowdingと配置距離で選び、達成数を多様性より優先する。
+        for group in priority_groups:
+            group_selected: list[int] = []
+            group_deferred: list[int] = []
+            for index in group:
+                reference = [*selected, *group_selected]
+                if not reference:
+                    minimum_distance = float("inf")
+                else:
+                    minimum_distance = float(
+                        np.min(
+                            layout_distances[
+                                int(index),
+                                np.asarray(reference, dtype=np.int64),
+                            ]
+                        )
+                    )
+                minimum_distances[index] = minimum_distance
+                if minimum_distance + 1.0e-12 >= self.minimum_layout_distance:
+                    group_selected.append(index)
+                else:
+                    group_deferred.append(index)
+            deferred.extend(group_deferred)
+            for index in [*group_selected, *group_deferred]:
                 selected.append(index)
-                selected_set.add(index)
                 if len(selected) >= n_survive:
                     break
+            if len(selected) >= n_survive:
+                break
 
         for index in selected:
             value = minimum_distances.get(index, float("nan"))
@@ -264,6 +289,17 @@ class DirectDiversitySurvival(Survival):
                 "selected": int(len(selected)),
                 "near_duplicates_deferred": int(len(deferred)),
                 "minimum_layout_distance": float(self.minimum_layout_distance),
+                "selected_width4_min": int(
+                    min((width4_counts[index] for index in selected), default=0)
+                ),
+                "selected_width4_max": int(
+                    max((width4_counts[index] for index in selected), default=0)
+                ),
+                "selected_width4_mean": float(
+                    np.mean([width4_counts[index] for index in selected])
+                    if selected
+                    else 0.0
+                ),
             }
         )
         return pop[np.asarray(selected, dtype=np.int64)]
@@ -316,7 +352,7 @@ class BoundarySegment:
 # キーから世代ごとの上限を外す。段階制約の更新時は保存済み生値から
 # ``成分 - 現在上限`` だけを再計算する。
 _CONSTRAINT_CACHE: OrderedDict[
-    tuple, tuple[float, dict[str, object]]
+    tuple, tuple[float, dict[str, object], dict[str, object]]
 ] = OrderedDict()
 # 交叉は物理制約だけを必要とする。完全な整然性評価を誤って呼ばないため、
 # 物理制約専用の小さなキャッシュを分離する。
@@ -1089,7 +1125,7 @@ def _materialize_orderliness(
 
 
 class Direct138LayoutProblem(ElementwiseProblem):
-    """通常ブース3変数・テーブル2変数の制約付き直接配置問題。"""
+    """物理＋1セル到達性を必須、4セル達成数を環境選択へ渡す問題。"""
 
     def __init__(
         self,
@@ -1113,7 +1149,7 @@ class Direct138LayoutProblem(ElementwiseProblem):
         super().__init__(
             n_var=design_variable_count(cfg),
             n_obj=2,
-            n_ieq_constr=1 + len(self.orderliness_limits.as_dict()),
+            n_ieq_constr=1,
             xl=xl,
             xu=xu,
             vtype=int,
@@ -1121,7 +1157,7 @@ class Direct138LayoutProblem(ElementwiseProblem):
         )
 
     def set_orderliness_limits(self, limits: OrderlinessLimits) -> None:
-        """段階制約で使用する現在世代の上限を更新する。"""
+        """説明用整然性特徴量の正規化基準を更新する。"""
         self.orderliness_limits = limits
 
     def _positions_and_cache_key(self, x) -> tuple[tuple, tuple]:
@@ -1167,19 +1203,12 @@ class Direct138LayoutProblem(ElementwiseProblem):
         cached = _CONSTRAINT_CACHE.get(cache_key)
         if cached is not None:
             _CONSTRAINT_CACHE.move_to_end(cache_key)
-            physical, raw_orderliness = cached
+            physical, width_profile, raw_orderliness = cached
             orderliness = _materialize_orderliness(
                 raw_orderliness,
                 self.orderliness_limits,
             )
-            constraints = np.asarray(
-                [
-                    float(raw_orderliness[name]) - limit
-                    for name, limit in self.orderliness_limits.as_dict().items()
-                ],
-                dtype=float,
-            )
-            return float(physical), constraints, orderliness
+            return float(physical), width_profile, np.empty(0), orderliness
 
         geometry = build_placement_geometry(self.cfg, positions)
         physical_cached = _PHYSICAL_CONSTRAINT_CACHE.get(cache_key)
@@ -1195,6 +1224,24 @@ class Direct138LayoutProblem(ElementwiseProblem):
         else:
             _PHYSICAL_CONSTRAINT_CACHE.move_to_end(cache_key)
             physical = float(physical_cached)
+        width_profile = (
+            compute_width_reachability_profile(
+                self.cfg,
+                self.venue,
+                positions,
+                geometry=geometry,
+            )
+            if physical <= 0.0
+            else {
+                "target_width": 4,
+                "required_booth_count": len(self.cfg.booths),
+                "booth_widths": tuple(0 for _ in self.cfg.booths),
+                "achieved_counts": {4: 0, 3: 0, 2: 0, 1: 0},
+                "exact_counts": {4: 0, 3: 0, 2: 0, 1: 0},
+                "four_cell_achievement_count": 0,
+                "all_booths_one_cell_reachable": False,
+            }
+        )
         orderliness = compute_direct_orderliness(
             self.cfg,
             x,
@@ -1202,27 +1249,32 @@ class Direct138LayoutProblem(ElementwiseProblem):
             venue=self.venue,
             geometry=geometry,
         )
-        constraints = np.asarray(
-            [
-                float(orderliness[name]) - limit
-                for name, limit in self.orderliness_limits.as_dict().items()
-            ],
-            dtype=float,
-        )
         raw_orderliness = _raw_orderliness(orderliness)
-        _CONSTRAINT_CACHE[cache_key] = (physical, raw_orderliness)
+        _CONSTRAINT_CACHE[cache_key] = (
+            physical,
+            width_profile,
+            raw_orderliness,
+        )
         _CONSTRAINT_CACHE.move_to_end(cache_key)
         self._trim_cache(_CONSTRAINT_CACHE)
-        return physical, constraints, orderliness
+        return physical, width_profile, np.empty(0), orderliness
 
     def is_orderly(self, x) -> bool:
-        _, constraints, _ = self.constraint_components(x)
-        return bool(np.all(constraints <= 0.0))
+        """後方互換用。整然性は説明用特徴量なので常にTrue。"""
+        return True
 
     def _evaluate(self, x, out, *args, **kwargs) -> None:
-        physical, order_constraints, orderliness = self.constraint_components(x)
-        all_constraints = [physical, *order_constraints.tolist()]
-        if physical > 0.0 or np.any(order_constraints > 0.0):
+        physical, width_profile, _order_constraints, orderliness = (
+            self.constraint_components(x)
+        )
+        all_constraints = [physical]
+        out["width4_achievement_count"] = float(
+            width_profile["four_cell_achievement_count"]
+        )
+        out["width4_required_count"] = float(width_profile["required_booth_count"])
+        out["booth_access_widths"] = width_profile["booth_widths"]
+        # 4セル達成数と整然性はハード制約にせず、物理違反だけ評価を省略する。
+        if physical > 0.0:
             out["F"] = [PENALTY_OBJECTIVE, PENALTY_OBJECTIVE]
             out["G"] = all_constraints
             out["kpis"] = {}
@@ -1622,7 +1674,7 @@ def construct_random_orderly_layout(
 
 
 class RandomFeasibleDirectSampling(Sampling):
-    """固定配置・列・外周モチーフを使わず、物理的に有効な初期集団を作る。"""
+    """数理最適化を使わず、幾何＋1セル幅到達性を満たす初期集団を作る。"""
 
     def __init__(
         self,
@@ -1638,34 +1690,32 @@ class RandomFeasibleDirectSampling(Sampling):
         self.position_trials = int(position_trials)
 
     def _do(self, problem: Direct138LayoutProblem, n_samples: int, **kwargs):
-        rng = np.random.default_rng(self.seed)
-        venue = build_base_venue(self.cfg)
         output = np.empty((int(n_samples), problem.n_var), dtype=np.int64)
-        known: set[tuple[int, ...]] = set()
+        restarts = max(8, min(32, self.max_trials_per_individual // 200))
+        trials_per_booth = max(100, min(400, self.position_trials))
         for row in range(int(n_samples)):
-            for _ in range(self.max_trials_per_individual):
-                try:
-                    candidate = sample_valid_layout(
-                        rng,
-                        problem.xl,
-                        problem.xu,
-                        self.cfg,
-                        venue,
-                        max_trials=max(1000, self.position_trials),
-                    )
-                except RuntimeError:
-                    continue
-                key = tuple(int(v) for v in candidate)
-                if key in known:
-                    continue
-                output[row] = candidate
-                known.add(key)
-                break
-            else:
-                raise RuntimeError(
-                    "重複しない完全ランダム物理制約充足初期個体を生成できません。"
-                    "initial_max_trialsを増やしてください。"
+            rng = np.random.default_rng(
+                _derived_seed(self.seed, row, 7_000_001)
+            )
+            accepted = None
+            for _ in range(restarts):
+                candidate = _greedy_layout_attempt(
+                    rng,
+                    self.cfg,
+                    problem.venue,
+                    problem.xl,
+                    problem.xu,
+                    trials_per_booth,
                 )
+                if candidate is not None and problem.physical_violation(candidate) <= 0.0:
+                    accepted = np.asarray(candidate, dtype=np.int64)
+                    break
+            if accepted is None:
+                raise RuntimeError(
+                    "ランダム貪欲法で幾何制約と1セル幅到達性を満たす"
+                    "初期個体を生成できませんでした"
+                )
+            output[row] = accepted
         return output
 
 
@@ -1677,7 +1727,7 @@ def _initial_individual_task(
     retry_index: int,
     max_trials_per_individual: int,
     position_trials: int,
-) -> tuple[int, np.ndarray]:
+) -> tuple[int, np.ndarray | None, str | None]:
     """並列数に依存しない乱数系列で初期個体を1つ生成する。"""
 
     task_seed = _derived_seed(
@@ -1693,7 +1743,12 @@ def _initial_individual_task(
         max_trials_per_individual=max_trials_per_individual,
         position_trials=position_trials,
     )
-    return int(individual_index), sampler._do(problem, 1)[0]
+    try:
+        return int(individual_index), sampler._do(problem, 1)[0], None
+    except RuntimeError as exc:
+        # 1ワーカーの失敗で全初期化をRemoteTraceback終了させず、親側で
+        # 失敗個体だけ決定的にseedを変えて再試行する。
+        return int(individual_index), None, str(exc)
 
 
 class DirectTwoPointCrossover(Crossover):
@@ -1827,18 +1882,11 @@ class DirectMultiScaleMutation(Mutation):
         return self.individual_prob, self.weights
 
     def _is_feasible(self, problem, x) -> bool:
-        physical, order_constraints, _ = problem.constraint_components(x)
-        return bool(physical <= 0.0 and np.all(order_constraints <= 0.0))
+        return bool(problem.physical_violation(x) <= 0.0)
 
     def _is_acceptable(self, problem, candidate, current) -> bool:
-        """物理制約を守り、整然さ違反を悪化させない候補だけを受理する。"""
-        physical, constraints, _ = problem.constraint_components(candidate)
-        if physical > 0.0:
-            return False
-        _, current_constraints, _ = problem.constraint_components(current)
-        candidate_cv = float(np.sum(np.maximum(constraints, 0.0)))
-        current_cv = float(np.sum(np.maximum(current_constraints, 0.0)))
-        return candidate_cv <= current_cv + 1.0e-12
+        """整然性・到達幅の増減を問わず、必須物理制約を守る候補を受理する。"""
+        return bool(problem.physical_violation(candidate) <= 0.0)
 
     def _mutate_local(self, problem, x, rng) -> None:
         count = int(rng.integers(1, min(4, len(self.cfg.booths)) + 1))
@@ -2536,6 +2584,14 @@ def run_direct_nsga2(
     )
     result.orderliness_components = components
     result.orderliness_limits = fixed_limits
+    result.width_reachability_profiles = [
+        compute_width_reachability_profile(
+            cfg,
+            problem.venue,
+            to_integer_layout(x, cfg),
+        )
+        for x in designs
+    ]
     result.mutation_settings = {
         "exploration_phase": {
             "through_generation": int(exploration_generations),
@@ -2566,11 +2622,11 @@ def run_direct_nsga2(
     # minimize() は既定で algorithm を deepcopy して実行するため、実行履歴は
     # result.algorithm から回収する（元の algorithm は空のまま）。
     result.memetic_history = list(result.algorithm.memetic_history)
-    result.orderliness_constraint_mode = "fixed_from_first_generation"
+    result.orderliness_constraint_mode = "descriptive_only_not_a_constraint"
     result.diversity_settings = {
         "minimum_layout_distance": float(minimum_layout_distance),
         "distance": "mean_booth_displacement_and_orientation_difference",
-        "selection": "rank_and_objective_crowding_then_layout_distance",
+        "selection": "width4_achievement_then_rank_crowding_then_layout_distance",
     }
     result.diversity_history = list(result.algorithm.survival.history)
     executed_mutation = result.algorithm.mating.mutation
@@ -2614,7 +2670,7 @@ def prepare_random_feasible_direct_population(
                 int(index),
                 int(retry_counts[index]),
                 int(initial_max_trials),
-                1000,
+                250,
             )
             for index in pending
         ]
@@ -2623,11 +2679,20 @@ def prepare_random_feasible_direct_population(
         else:
             generated = list(starmap(_initial_individual_task, tasks))
         next_pending = []
-        for index, candidate in sorted(generated, key=lambda item: item[0]):
+        for index, candidate, error in sorted(generated, key=lambda item: item[0]):
+            if candidate is None:
+                retry_counts[index] += 1
+                if retry_counts[index] >= 12:
+                    raise RuntimeError(
+                        "幾何制約と1セル幅到達性を満たす初期個体を"
+                        f"再試行内に生成できませんでした: {error or '原因不明'}"
+                    )
+                next_pending.append(int(index))
+                continue
             key = tuple(int(value) for value in candidate)
             if key in known:
                 retry_counts[index] += 1
-                if retry_counts[index] >= initial_max_trials:
+                if retry_counts[index] >= 12:
                     raise RuntimeError(
                         "重複しないランダム制約充足初期個体を生成できません"
                     )
@@ -2646,13 +2711,24 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     designs = np.atleast_2d(np.asarray(result.X, dtype=np.int64))
     rows = []
-    for index, (design, components) in enumerate(
-        zip(designs, result.orderliness_components)
+    for index, (design, components, width_profile) in enumerate(
+        zip(
+            designs,
+            result.orderliness_components,
+            result.width_reachability_profiles,
+        )
     ):
         row = {"pareto_index": index}
         row.update({f"x{gene}": int(value) for gene, value in enumerate(design)})
         for key in ("total", *ORDERLINESS_COMPONENT_KEYS):
             row[f"order_{key}"] = float(components[key])
+        row["width4_achievement_count"] = int(
+            width_profile["four_cell_achievement_count"]
+        )
+        for width in (4, 3, 2, 1):
+            row[f"exact_width_{width}_booths"] = int(
+                width_profile["exact_counts"][width]
+            )
         rows.append(row)
     pd.DataFrame(rows).to_csv(
         output / f"direct_{designs.shape[1]}_designs.csv", index=False, encoding="utf-8-sig"
@@ -2678,14 +2754,21 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
             "invalid_offspring": "revert_to_corresponding_parent",
         },
         "orderliness_limits": result.orderliness_limits.as_dict(),
-        "initialization": "uniform_random_xy_and_active_booth_orientation_physical_feasible_only",
+        "initialization": "random_greedy_geometry_plus_one_cell_reachability",
         "uses_fixed_position_for_initialization": False,
         "post_optimization_repair": False,
+        "reachability_constraints": {
+            "initialization_and_operator_hard_constraint": "geometry_plus_one_cell_width",
+            "environmental_selection": "maximize_number_of_four_cell_reachable_booths_first",
+            "simulation_walkable": "widest_available_path_per_target_in_order_4_3_2_1",
+            "final_pareto_requirement": "all_booths_at_least_one_cell_reachable",
+        },
         "objectives": {
             "f_move": "mean_free_walk_seconds_from_attached_metrics",
             "f_congestion": "booth_near_congestion_from_attached_metrics",
         },
         "orderliness": {
+            "role": "descriptive_features_only_not_constraints",
             "aggregation": "seven_independent_constraints_without_compensation",
             "grouping": "area_x_mixed_plus_active_and_table_checks",
             "motifs": ["interior_horizontal_or_vertical_lane", "venue_boundary_chain"],
@@ -2713,7 +2796,7 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
             "shared_geometry": "physical and orderliness checks reuse identical placement geometry",
             "shared_motif_features": "centers, sizes, lanes, groups, and boundary segments are reused",
             "redundant_feasibility_checks_removed": True,
-            "parallel_initialization": "deterministic per-individual tasks on the evaluation process pool",
+            "parallel_initialization": "bounded random-greedy tasks with deterministic per-individual seeds",
             "parallel_memetic_generation": "deterministic per-parent tasks on the evaluation process pool",
             "surrogate_or_approximation": False,
             "evaluation_budget_changed": False,
