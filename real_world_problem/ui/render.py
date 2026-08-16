@@ -11,9 +11,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 
 from src.constraints import design_variable_count, to_integer_layout  # noqa: E402
 from src.models import Config  # noqa: E402
@@ -33,7 +35,8 @@ VIZ_TIMEOUT_SECONDS = 3600.0
 #: 描画の版。`ui_cache/` のファイル名に混ぜてキャッシュを世代管理する。
 #: src/visualization.py の見た目を変えたら +1 する(古い画像の再利用を防ぐ)。
 #: 2: テーブル・椅子を灰色の矩形から fig/table.png のアイコンに変更。
-RENDER_VERSION = 2
+#: 3: 選択解の実際の歩行可能セルを重ねた通路図を追加。
+RENDER_VERSION = 3
 
 
 def viz_context(cfg: Config) -> StaticContext:
@@ -81,6 +84,73 @@ def render_layout(cfg: Config, ctx: StaticContext, x, path: Path) -> Path:
     fig, ax = plt.subplots(figsize=(9, 9 * cfg.grid_height / max(cfg.grid_width, 1)))
     draw_venue(ax, cfg, layout, legend=True)
     ax.set_title("会場レイアウト")
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+# ---------------------------------------------------------------- 歩行可能通路
+
+
+def render_walkable_corridors(
+    cfg: Config,
+    ctx: StaticContext,
+    x,
+    path: Path,
+) -> Path:
+    """選択解のブース配置に実際の歩行可能セルを重ねて PNG 保存する。
+
+    独自に通路を推定せず、``apply_layout`` が生成した ``layout.walkable``
+    をそのまま使う。したがって、4→3→2→1 セル幅の順に各ブースへの
+    到達経路を確保する現行の会場生成ロジックと表示結果が一致する。
+    """
+    positions = decode_positions(cfg, x)
+    layout = apply_layout(cfg, ctx.venue, positions)
+
+    fig, ax = plt.subplots(figsize=(9, 9 * cfg.grid_height / max(cfg.grid_width, 1)))
+    draw_venue(ax, cfg, layout, legend=True)
+
+    # RGBA 配列を使い、歩行可能セルだけを半透明の青で塗る。
+    # ブース番号・受付・退出記号を読める程度の薄さに固定する。
+    overlay = np.zeros((*layout.walkable.shape, 4), dtype=float)
+    overlay[np.asarray(layout.walkable, dtype=bool)] = (0.10, 0.55, 0.95, 0.28)
+    ax.imshow(
+        overlay,
+        origin="upper",
+        interpolation="nearest",
+        extent=(-0.5, cfg.grid_width - 0.5, cfg.grid_height - 0.5, -0.5),
+        zorder=3,
+    )
+
+    # draw_venue の既存凡例を保ち、歩行可能セルだけを追記する。
+    legend = ax.get_legend()
+    handles = []
+    labels = []
+    if legend is not None:
+        handles = list(
+            getattr(legend, "legend_handles", getattr(legend, "legendHandles", []))
+        )
+        labels = [text.get_text() for text in legend.get_texts()]
+    handles.append(
+        Patch(
+            facecolor=(0.10, 0.55, 0.95, 0.28),
+            edgecolor="#1976d2",
+            label="歩行可能セル",
+        )
+    )
+    labels.append("歩行可能セル")
+    ax.legend(
+        handles=handles,
+        labels=labels,
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        fontsize=8,
+        framealpha=0.9,
+    )
+
+    ax.set_title("歩行可能通路")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=130, bbox_inches="tight")

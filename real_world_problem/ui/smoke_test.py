@@ -8,7 +8,7 @@
 確認する内容:
   1. UI の入力値 → config YAML → load_config() が通るか
   2. 完全ランダム初期集団から直接配置 NSGA-II が回り、スナップショットが出るか
-  3. レイアウト図 / ヒートマップ / アニメーションが生成できるか
+  3. レイアウト図 / 歩行可能通路 / ヒートマップ / アニメーションが生成できるか
 
 pytest には載せていない。実行に十数秒〜数十秒かかるため、
 手動の動作確認用として切り離してある。
@@ -230,6 +230,16 @@ def main() -> int:
     )
 
     t0 = time.perf_counter()
+    walkable_png = render.render_walkable_corridors(
+        cfg, ctx, x, out / "smoke_walkable.png"
+    )
+    ok &= check(
+        "歩行可能通路図",
+        walkable_png.exists(),
+        f"{time.perf_counter() - t0:.1f} 秒",
+    )
+
+    t0 = time.perf_counter()
     heat_png, kpis = render.render_heatmap(cfg, ctx, x, out / "smoke_heat.png")
     ok &= check("ヒートマップ", heat_png.exists(), f"{time.perf_counter() - t0:.1f} 秒")
     ok &= check("可視化がタイムアウトしていない", not kpis["timed_out"])
@@ -255,8 +265,11 @@ def main() -> int:
     print(f"\n{'=' * 70}")
     print("結果:", "すべて OK" if ok else "NG あり(上を確認)")
     print(f"生成物: {out}")
-    print("  smoke_layout.png / smoke_heat.png" + ("" if args.skip_anim else " / smoke_anim.gif"))
-    print("この 3 枚を目視で確認してください(README 手順 3 の観点)。")
+    print(
+        "  smoke_layout.png / smoke_walkable.png / smoke_heat.png"
+        + ("" if args.skip_anim else " / smoke_anim.gif")
+    )
+    print("これらを目視で確認してください(README 手順 3 の観点)。")
     print(f"後片付け: {rd} を削除")
     print("=" * 70)
     return 0 if ok else 1
