@@ -94,9 +94,6 @@ def _run_direct(
         donor_minimum_distance=params.donor_minimum_distance,
         donor_refresh_probability=params.donor_refresh_probability,
         minimum_layout_distance=params.minimum_layout_distance,
-        orderliness_tightening_generations=(
-            params.orderliness_tightening_generations
-        ),
         memetic_interval=params.memetic_interval,
         memetic_start_generation=params.memetic_start_generation,
         memetic_parents=params.memetic_parents,

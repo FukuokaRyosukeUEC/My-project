@@ -280,23 +280,13 @@ def sidebar_inputs() -> run_store.RunParams:
             value=30.0, step=5.0,
             help="1 配置のシミュレーションがこの時間を超えると打ち切り、ペナルティ値になります。",
         )
+        # ゴミステーション利用確率はUIでは編集せず、プリセット値を使用する。
         waste_cfg = preset_main.get("waste_disposal") or {}
-        general_waste_probability = st.number_input(
-            "通常時のゴミステーション利用確率",
-            min_value=0.0,
-            max_value=0.99,
-            value=float(waste_cfg.get("general_probability", 0.05)),
-            step=0.01,
-            format="%.2f",
+        general_waste_probability = float(
+            waste_cfg.get("general_probability", 0.05)
         )
-        food_waste_probability = st.number_input(
-            "飲食後のゴミステーション利用確率",
-            min_value=0.0,
-            max_value=0.99,
-            value=float(waste_cfg.get("after_food_probability", 0.85)),
-            step=0.01,
-            format="%.2f",
-            help="100%には設定できません。テーブル利用後もこの確率で立ち寄ります。",
+        food_waste_probability = float(
+            waste_cfg.get("after_food_probability", 0.85)
         )
 
     # --- 最適化
@@ -304,6 +294,7 @@ def sidebar_inputs() -> run_store.RunParams:
         st.caption(
             "通常ブース=(x, y, 方向)、テーブル=(x, y)の直接表現で探索します。"
             "初期集団は固定配置や整列テンプレートを使わず、完全ランダムに生成します。"
+            "交叉はブース単位の2点交叉です。整然性制約の上限は第1世代から固定します。"
         )
         pop = st.number_input(
             "探索個体数", min_value=4, max_value=1000,
