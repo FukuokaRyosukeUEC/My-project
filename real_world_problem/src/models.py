@@ -61,6 +61,9 @@ class BoothSpec:
                        立ち寄る付帯設備で、体験ブース数には数えない。
     theme:
         normal / music(音楽祭関連)。色分け用の属性。
+    placement_group:
+        配置最適化で近接させるキッチンカーの同種グループ。
+        空文字・通常ブース・テーブル・ゴミステーションは対象外とする。
     area:
         所属広場(venue_shape.areas の name)。空なら制約なし。
         指定時はブース本体セルがその広場内に収まることが配置制約になる。
@@ -81,6 +84,7 @@ class BoothSpec:
     name: str = ""
     kind: str = "booth"
     theme: str = "normal"
+    placement_group: str = ""
     area: str = ""
     fixed_position: tuple | None = None
 
@@ -191,6 +195,14 @@ class Config:
     blocked_replan_count: int = 3
     blocked_congestion_weight: float = 0.00005
     congestion_travel_time_weight: float = 1.0
+    # 混雑回避経路。現在の占有率に次セルへの流入予測を加え、周辺セルへ
+    # 減衰拡張したリスクマップを A* と前方監視で共用する。
+    crowd_lookahead_cells: int = 5
+    crowd_inflation_radius: int = 2
+    crowd_prediction_weight: float = 0.5
+    severe_congestion_weight: float = 4.0
+    crowd_replan_cooldown_steps: int = 3
+    crowd_replan_improvement_ratio: float = 0.10
     # テーブル利用・疲労
     table_rest_seconds: float = 45.0
     table_after_food_probability: float = 0.65
@@ -219,6 +231,7 @@ class Config:
     arrival_profile: tuple = ((0.0, 400.0, 1.0),)
     # 制約(§14)
     min_corridor_width: int = MIN_PEDESTRIAN_CORRIDOR_WIDTH_CELLS
+    same_type_max_distance_meters: float = 5.0
     # 幸福度(§13)
     hap_alpha: float = 0.05
     hap_beta: float = 0.1
@@ -355,6 +368,7 @@ def load_config(config_dir: str | Path) -> Config:
             name=str(b.get("name", "")),
             kind=str(b.get("kind", "booth")),
             theme=str(b.get("theme", "normal")),
+            placement_group=str(b.get("placement_group", "")).strip(),
             area=str(b.get("area", "")),
             fixed_position=_fixed_position(b),
         )
@@ -399,6 +413,7 @@ def load_config(config_dir: str | Path) -> Config:
     resting = main.get("resting") or {}
     waste_disposal = main.get("waste_disposal") or {}
     happiness_cfg = main.get("happiness") or {}
+    routing_cfg = main.get("routing") or {}
     cfg = Config(
         grid_width=int(main["grid"]["width"]),
         grid_height=int(main["grid"]["height"]),
@@ -443,6 +458,18 @@ def load_config(config_dir: str | Path) -> Config:
         blocked_congestion_weight=float(main["simulation"].get("blocked_congestion_weight", 0.00005)),
         congestion_travel_time_weight=float(
             main["simulation"].get("congestion_travel_time_weight", 1.0)
+        ),
+        crowd_lookahead_cells=int(routing_cfg.get("crowd_lookahead_cells", 5)),
+        crowd_inflation_radius=int(routing_cfg.get("crowd_inflation_radius", 2)),
+        crowd_prediction_weight=float(routing_cfg.get("crowd_prediction_weight", 0.5)),
+        severe_congestion_weight=float(
+            routing_cfg.get("severe_congestion_weight", 4.0)
+        ),
+        crowd_replan_cooldown_steps=int(
+            routing_cfg.get("crowd_replan_cooldown_steps", 3)
+        ),
+        crowd_replan_improvement_ratio=float(
+            routing_cfg.get("crowd_replan_improvement_ratio", 0.10)
         ),
         table_rest_seconds=float(resting.get("rest_seconds", 45.0)),
         table_after_food_probability=float(
@@ -493,6 +520,12 @@ def load_config(config_dir: str | Path) -> Config:
                 )
             ),
         ),
+        same_type_max_distance_meters=float(
+            (main.get("constraints") or {}).get(
+                "same_type_max_distance_meters",
+                5.0,
+            )
+        ),
         hap_alpha=float(happiness_cfg["alpha"]),
         hap_beta=float(happiness_cfg["beta"]),
         hap_gamma=float(happiness_cfg["gamma"]),
@@ -508,6 +541,22 @@ def load_config(config_dir: str | Path) -> Config:
         raise ValueError("booth_geometry.queue_capacity_per_cell must be at least 1")
     if cfg.congestion_travel_time_weight < 0.0:
         raise ValueError("simulation.congestion_travel_time_weight must be non-negative")
+    if cfg.same_type_max_distance_meters <= 0.0:
+        raise ValueError("constraints.same_type_max_distance_meters must be positive")
+    if not 0.0 <= cfg.safe_occupancy_ratio <= 1.0:
+        raise ValueError("simulation.safe_occupancy_ratio must be in [0, 1]")
+    if cfg.crowd_lookahead_cells < 1:
+        raise ValueError("routing.crowd_lookahead_cells must be at least 1")
+    if cfg.crowd_inflation_radius < 0:
+        raise ValueError("routing.crowd_inflation_radius must be non-negative")
+    if cfg.crowd_prediction_weight < 0.0:
+        raise ValueError("routing.crowd_prediction_weight must be non-negative")
+    if cfg.severe_congestion_weight < 0.0:
+        raise ValueError("routing.severe_congestion_weight must be non-negative")
+    if cfg.crowd_replan_cooldown_steps < 1:
+        raise ValueError("routing.crowd_replan_cooldown_steps must be at least 1")
+    if not 0.0 <= cfg.crowd_replan_improvement_ratio < 1.0:
+        raise ValueError("routing.crowd_replan_improvement_ratio must be in [0, 1)")
     if not 0.0 <= cfg.table_after_food_probability <= 1.0:
         raise ValueError("resting.after_food_probability must be in [0, 1]")
     if not 0.0 <= cfg.waste_station_general_probability < 1.0:
@@ -580,6 +629,10 @@ class Visitor:
     entry_delay_seconds: float = 0.0     # 入場遅延(§4.5【v2】)
     current_queue_wait: float = 0.0      # 現在の待ち行列での待機秒数
     steps_since_plan: int = 0
+    last_crowd_replan_step: int = -1_000_000
+    # 同じ経路しか見つからない場合も blocked_count は保持するため、
+    # ブロック起因の再探索を毎ステップ繰り返さないよう試行時刻を分けて持つ。
+    last_blocked_replan_step: int = -1_000_000
     actual_spawn_step: int = -1          # 実際に入場したステップ(遅延込み)
     # --- 疲労・テーブル利用 ---
     fatigue: float = 0.0                 # 0=疲労なし, 1=最大疲労

@@ -34,7 +34,7 @@ from .models import (
     Visitor,
 )
 from .rng import decision_rng, softmax_choice, tiebreak_rng
-from .routing import astar, bfs_distance_field, descend_path_indices
+from .routing import astar, bfs_distance_field, descend_path_indices, route_cost
 from .venue import (
     Layout,
     Venue,
@@ -114,6 +114,9 @@ class Simulation:
         self.walkable = layout.walkable
         self.capacity = layout.capacity.astype(np.int16)
         self.occupancy = np.zeros((H, W), dtype=np.int16)
+        # A* と前方混雑監視で共用する動的リスクマップ。占有率に次セルへの
+        # 流入予測を加え、通行可能セル上で周囲へ減衰拡張して更新する。
+        self.crowd_risk = np.zeros((H, W), dtype=np.float64)
         # 占有率計算用の1次元ビュー。occupancyはin-place更新されるため、
         # このビューにも常に最新値が反映される。
         self._occupancy_flat = self.occupancy.reshape(-1)
@@ -375,6 +378,7 @@ class Simulation:
             self._spawn_step(t)
             self._booth_step(t)
             self._queue_step(t)
+            self._refresh_crowd_risk_map()
             self._decision_step(t)
             self._movement_step(t)
             self._fatigue_step()
@@ -601,6 +605,64 @@ class Simulation:
             if leavers:
                 self._shift_queue(rt)
 
+    # ------------------------------------------------------------ 3.5 混雑予測
+    def _refresh_crowd_risk_map(self, movers=None) -> np.ndarray:
+        """現在占有率と次セルへの流入予測から周辺混雑マップを作る。
+
+        混雑の影響は通行可能セル上だけを4近傍へ伝播させる。そのため、壁や
+        ブースの反対側にある混雑が近道扱いで漏れることはない。
+        """
+        if movers is None:
+            movers = self._visitors_from_mask(self._moving_mask)
+
+        capacity = np.maximum(self.capacity.astype(np.float64), 1.0)
+        predicted = self.occupancy.astype(np.float64) / capacity
+        demand = np.zeros_like(predicted)
+        for v in movers:
+            if (
+                v.position is not None
+                and v.path_index < len(v.path)
+                and v.state in (WALKING, EXITING)
+            ):
+                next_x, next_y = v.path[v.path_index]
+                if self.walkable[next_y, next_x]:
+                    demand[next_y, next_x] += 1.0
+        predicted += self.cfg.crowd_prediction_weight * demand / capacity
+        predicted[~self.walkable] = 0.0
+
+        risk = predicted.copy()
+        frontier = predicted
+        for distance in range(1, self.cfg.crowd_inflation_radius + 1):
+            decay = max(0.0, 1.0 - 0.25 * distance)
+            if decay <= 0.0:
+                break
+            neighbors = np.zeros_like(frontier)
+            neighbors[:, 1:] = np.maximum(neighbors[:, 1:], frontier[:, :-1])
+            neighbors[:, :-1] = np.maximum(neighbors[:, :-1], frontier[:, 1:])
+            neighbors[1:, :] = np.maximum(neighbors[1:, :], frontier[:-1, :])
+            neighbors[:-1, :] = np.maximum(neighbors[:-1, :], frontier[1:, :])
+            neighbors[~self.walkable] = 0.0
+            risk = np.maximum(risk, decay * neighbors)
+            frontier = neighbors
+
+        self.crowd_risk = risk
+        return risk
+
+    def _find_path(self, v: Visitor, goal_set: set, hfield: np.ndarray):
+        """現在の周辺混雑マップを使って、来場者別の経路を探索する。"""
+        return astar(
+            self.walkable,
+            self.occupancy,
+            self.capacity,
+            v.position,
+            goal_set,
+            v.congestion_avoidance,
+            hfield,
+            crowd_risk=self.crowd_risk,
+            safe_occupancy_ratio=self.cfg.safe_occupancy_ratio,
+            severe_congestion_weight=self.cfg.severe_congestion_weight,
+        )
+
     # ------------------------------------------------------------ 4. 意思決定(§8)
     def _decision_step(self, t: int) -> None:
         cfg = self.cfg
@@ -671,15 +733,7 @@ class Simulation:
             self._set_state(v, WALKING)
             self._arrive_at_reception(v, t)
             return
-        path = astar(
-            self.walkable,
-            self.occupancy,
-            self.capacity,
-            v.position,
-            {goal},
-            v.congestion_avoidance,
-            self.booth_fields[target],
-        )
+        path = self._find_path(v, {goal}, self.booth_fields[target])
         if path is None:  # 静的距離が有限なら理論上到達可能(安全側フォールバック)
             v.given_up_booths.add(target)
             return
@@ -724,15 +778,7 @@ class Simulation:
             self._set_state(v, WALKING)
             self._arrive_at_reception(v, t)
             return True
-        path = astar(
-            self.walkable,
-            self.occupancy,
-            self.capacity,
-            v.position,
-            goal_set,
-            v.congestion_avoidance,
-            self.booth_fields[target],
-        )
+        path = self._find_path(v, goal_set, self.booth_fields[target])
         if path is None:
             return False
         v.path, v.path_index = path, 0
@@ -789,15 +835,7 @@ class Simulation:
             self._set_state(v, WALKING)
             self._arrive_at_reception(v, t)
             return True
-        path = astar(
-            self.walkable,
-            self.occupancy,
-            self.capacity,
-            v.position,
-            {goal},
-            v.congestion_avoidance,
-            self.booth_fields[target],
-        )
+        path = self._find_path(v, {goal}, self.booth_fields[target])
         if path is None:
             return False
         v.path, v.path_index = path, 0
@@ -905,15 +943,7 @@ class Simulation:
         if v.position in goal_set:
             self._finish(v)
             return
-        path = astar(
-            self.walkable,
-            self.occupancy,
-            self.capacity,
-            v.position,
-            goal_set,
-            v.congestion_avoidance,
-            self._exit_heuristic(v),
-        )
+        path = self._find_path(v, goal_set, self._exit_heuristic(v))
         v.path = path if path is not None else []
         v.path_index = 0
         v.steps_since_plan = 0
@@ -941,12 +971,23 @@ class Simulation:
         )
         return 1.0 + self.cfg.congestion_travel_time_weight * occupancy_ratio**2
 
+    def _path_has_crowding_ahead(self, v: Visitor) -> bool:
+        """現在位置の次から設定セル数以内に強い混雑があるかを返す。"""
+        start = int(v.path_index)
+        stop = min(len(v.path), start + self.cfg.crowd_lookahead_cells)
+        for x, y in v.path[start:stop]:
+            if self.crowd_risk[y, x] >= self.cfg.safe_occupancy_ratio:
+                return True
+        return False
+
     def _movement_step(self, t: int) -> None:
         cfg = self.cfg
         movers = [
             v for v in self._visitors_from_mask(self._moving_mask)
             if v.position is not None
         ]
+        # 意思決定ステップで新しく歩き始めた来場者も流入予測へ含める。
+        self._refresh_crowd_risk_map(movers)
 
         # 移動時間残高の加算(§3.4)。混雑セルでは1セルの移動に1より大きい
         # 残高が必要になる。最も遅いセルを通過できる値までは蓄積を許す。
@@ -957,15 +998,35 @@ class Simulation:
             v.move_credit = min(v.move_credit + gain, credit_cap)
             v.steps_since_plan += 1
 
-        # 再計画条件(§9.3)
+        # 再計画条件(§9.3)。前方混雑だけが理由の場合は、クールダウンを守り、
+        # 現経路より十分に改善する迂回路が見つかったときだけ切り替える。
         for v in movers:
-            need = (
+            blocked_need = (
                 v.blocked_count >= cfg.blocked_replan_count
+                and t - v.last_blocked_replan_step
+                >= cfg.crowd_replan_cooldown_steps
+            )
+            regular_need = (
+                blocked_need
                 or v.steps_since_plan > cfg.replan_interval_steps
                 or v.path_index >= len(v.path)
             )
-            if need:
-                self._replan(v)
+            crowd_need = (
+                self._path_has_crowding_ahead(v)
+                and t - v.last_crowd_replan_step
+                >= cfg.crowd_replan_cooldown_steps
+            )
+            if crowd_need:
+                v.last_crowd_replan_step = t
+            if blocked_need:
+                # 同じ経路を再採用した場合は blocked_count を保持するため、
+                # 再探索そのものにはクールダウンを設けて連続実行を防ぐ。
+                v.last_blocked_replan_step = t
+            if regular_need or crowd_need:
+                self._replan(
+                    v,
+                    require_improvement=crowd_need and not regular_need,
+                )
 
         blocked_dt = cfg.dt_seconds / cfg.n_substeps
         for _sub in range(cfg.n_substeps):
@@ -1030,12 +1091,12 @@ class Simulation:
             for v in arrivals:
                 self._handle_arrival(v, t)
 
-    def _replan(self, v: Visitor) -> None:
-        """§9.3 の再探索。計画時点の占有スナップショットでコスト評価(§9.2)。"""
+    def _replan(self, v: Visitor, require_improvement: bool = False) -> bool:
+        """動的リスクで再探索し、採用した場合だけ ``True`` を返す。"""
         if v.state == WALKING and v.target_booth_id is None:  # 防御(通常は発生しない)
             self._set_state(v, CHOOSING)
             v.path, v.path_index = [], 0
-            return
+            return False
         if v.state == EXITING:
             goal_set, hfield = self._exit_goal_set(v), self._exit_heuristic(v)
         else:
@@ -1048,19 +1109,48 @@ class Simulation:
         if v.position in goal_set:
             v.path, v.path_index = [], 0
             self._handle_arrival(v, self.t)
-            return
-        path = astar(
-            self.walkable, self.occupancy, self.capacity, v.position, goal_set,
-            v.congestion_avoidance, hfield,
-        )
+            return True
+        path = self._find_path(v, goal_set, hfield)
         if path is not None:
+            remaining_path = v.path[v.path_index:]
+            same_path = path == remaining_path
+            if require_improvement:
+                current_cost = route_cost(
+                    remaining_path,
+                    self.crowd_risk,
+                    v.congestion_avoidance,
+                    self.cfg.safe_occupancy_ratio,
+                    self.cfg.severe_congestion_weight,
+                )
+                candidate_cost = route_cost(
+                    path,
+                    self.crowd_risk,
+                    v.congestion_avoidance,
+                    self.cfg.safe_occupancy_ratio,
+                    self.cfg.severe_congestion_weight,
+                )
+                required_cost = current_cost * (
+                    1.0 - self.cfg.crowd_replan_improvement_ratio
+                )
+                if candidate_cost > required_cost:
+                    return False
             v.path, v.path_index = path, 0
             v.steps_since_plan = 0
-            v.blocked_count = 0
-        elif v.state == WALKING:
+            # 同じ経路しか得られなかった場合、長く待っている来場者の
+            # 競合解決優先度を失わせない。別経路へ切り替わった場合だけ、
+            # 新しい経路での待機として数え直す。
+            if not same_path:
+                v.blocked_count = 0
+            return True
+        if require_improvement:
+            # 混雑はソフトコストなので、迂回候補が見つからなくても現在経路を
+            # 捨てず、従来の定期・ブロック再探索まで歩行を継続する。
+            return False
+        if v.state == WALKING:
             self._give_up_target(v, v.target_booth_id)
             self._set_state(v, CHOOSING)
             v.path, v.path_index = [], 0
+        return False
 
     def _handle_arrival(self, v: Visitor, t: int) -> None:
         if v.state == EXITING:

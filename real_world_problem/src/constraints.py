@@ -3,6 +3,8 @@
 違反量の定義(§14【v2】):
 - 項目 1〜5(幾何): 違反セル数を合算(重み 1)
 - 項目 6〜7(BFS 到達性): 違反件数 × 100
+- 最適化配置では、指定された通常キッチンカーが設定距離以内に近傍を持つことも必須。
+  固定の比較配置は過去比較を維持するため、この追加制約を任意適用とする。
 
 初期個体生成・遺伝的操作の必須物理制約には1セル幅到達性を使う。
 4セル幅で到達できるブース数は別の特徴値としてNSGA-IIの環境選択へ渡し、
@@ -44,6 +46,60 @@ class PlacementGeometry:
     queue_cells: tuple[tuple[tuple[int, int], ...], ...]
     table_access_cells: tuple[tuple[tuple[int, int], ...], ...]
     claimed_cells: tuple[frozenset[tuple[int, int]], ...]
+
+
+def compute_same_type_proximity_violation(
+    cfg: Config,
+    positions: tuple,
+    geometry: PlacementGeometry | None = None,
+) -> float:
+    """設定距離以内に同じ配置グループを持たない対象ブース数を返す。
+
+    対象は ``kind: kitchen_car`` かつ ``placement_group`` が同じ店舗だけ。
+    通常ブース、グループが1店舗だけ、テーブル、ゴミステーションは対象外。
+    距離はブース本体の中心間ユークリッド距離をメートルへ換算して判定する。
+    """
+
+    geom = geometry or build_placement_geometry(cfg, positions)
+    groups: dict[str, list[int]] = {}
+    for booth_id, booth in enumerate(cfg.booths):
+        group = booth.placement_group.strip()
+        if (
+            not group
+            or booth.kind.strip().casefold() != "kitchen_car"
+            or booth.is_table
+            or booth.is_waste_station
+        ):
+            continue
+        groups.setdefault(group, []).append(booth_id)
+
+    centers: dict[int, tuple[float, float]] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        for booth_id in members:
+            cells = geom.booth_cells[booth_id]
+            centers[booth_id] = (
+                float(np.mean([x + 0.5 for x, _y in cells])),
+                float(np.mean([y + 0.5 for _x, y in cells])),
+            )
+
+    maximum = float(cfg.same_type_max_distance_meters)
+    violation = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        for booth_id in members:
+            center_x, center_y = centers[booth_id]
+            nearest = min(
+                np.hypot(center_x - centers[other][0], center_y - centers[other][1])
+                * cfg.cell_size_meters
+                for other in members
+                if other != booth_id
+            )
+            if nearest > maximum + 1.0e-9:
+                violation += 1
+    return float(violation)
 
 
 def build_placement_geometry(
@@ -210,6 +266,7 @@ def compute_violation(
     venue: Venue,
     positions: tuple,
     geometry: PlacementGeometry | None = None,
+    enforce_same_type_proximity: bool = False,
 ) -> float:
     """配置の制約違反量 g を返す(§14)。g == 0 なら有効配置。"""
     H, W = cfg.grid_height, cfg.grid_width
@@ -223,6 +280,13 @@ def compute_violation(
     booth_exits = geom.booth_exits
     qcells = geom.queue_cells
     table_access_cells = geom.table_access_cells
+
+    if enforce_same_type_proximity:
+        g += compute_same_type_proximity_violation(
+            cfg,
+            positions,
+            geometry=geom,
+        )
 
     # 使用セル集合(受付+行列): 相互重複チェック用
     claim_count = np.zeros((H, W), dtype=np.int16)  # 場内セルの多重使用数

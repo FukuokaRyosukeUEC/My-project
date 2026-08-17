@@ -47,7 +47,7 @@ time:
 
 capacities:
   default: 3
-  queue: 5                   # 20260629: 待機列 1 セル 5 人
+  queue: 2                   # 1m²の待機列セルに最大2人
   entrance: 10               # 2 セル合計で毎ステップ最大 20 人
   exit: 10
 
@@ -64,7 +64,7 @@ booth_geometry:
   reception_position: bottom_left
   exit_position: bottom_right
   queue_pattern: left_then_clockwise
-  queue_capacity_per_cell: 5
+  queue_capacity_per_cell: 2
   queue_walkable: false
 
 simulation:
@@ -81,6 +81,16 @@ simulation:
   q_norm_seconds: 600.0      # §8 Q_norm
   giveup_utility_penalty: 0.5   # §8 諦めブースへの減点
   utility_min_threshold: 0.0    # §8 全候補がこの値未満なら EXITING
+
+# 混雑回避経路。現在の占有率に「次にそのセルへ進む人数」を加え、
+# 半径2セルへ減衰させながら広げたリスクマップを経路探索に使う。
+routing:
+  crowd_lookahead_cells: 5          # 経路上の何セル先まで混雑を監視するか
+  crowd_inflation_radius: 2         # 混雑の影響を周囲へ広げるマンハッタン半径
+  crowd_prediction_weight: 0.5      # 次セルへの移動希望人数に掛ける予測係数
+  severe_congestion_weight: 4.0     # safe_occupancy_ratio 超過時の追加コスト
+  crowd_replan_cooldown_steps: 3    # 混雑起因の再探索を連続実行しない間隔
+  crowd_replan_improvement_ratio: 0.10 # 10%以上改善する迂回路だけ採用
 
 # 疲労とテーブル（ベンチ）利用。
 # 疲労度は 0～1。歩行・待機・体験で増え、着席中に減る。
@@ -122,6 +132,9 @@ arrival_profile:
 
 constraints:
   min_corridor_width: 1      # 20260629 には最低通路幅の追加制約なし
+  # 同じ placement_group が複数あるキッチンカーは、少なくとも1店舗を
+  # この中心距離以内に持つ。通常ブース・テーブル・ゴミステーション・単独種類は対象外。
+  same_type_max_distance_meters: 5.0
 
 happiness:                   # §13 補助KPI
   alpha: 0.05

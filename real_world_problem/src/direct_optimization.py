@@ -1182,7 +1182,7 @@ def _materialize_orderliness(
 
 
 class Direct138LayoutProblem(ElementwiseProblem):
-    """物理＋1セル到達性を必須、4セル達成数を環境選択へ渡す問題。"""
+    """物理・1セル到達性・同種近接を必須とする直接配置問題。"""
 
     def __init__(
         self,
@@ -1248,6 +1248,7 @@ class Direct138LayoutProblem(ElementwiseProblem):
                 self.venue,
                 positions,
                 geometry=geometry,
+                enforce_same_type_proximity=True,
             )
         )
         _PHYSICAL_CONSTRAINT_CACHE[cache_key] = physical
@@ -1276,6 +1277,7 @@ class Direct138LayoutProblem(ElementwiseProblem):
                     self.venue,
                     positions,
                     geometry=geometry,
+                    enforce_same_type_proximity=True,
                 )
             )
         else:
@@ -1393,6 +1395,37 @@ def _random_lane_partition(booth_ids: tuple[int, ...], rng) -> list[list[int]]:
         result.append(shuffled[start : start + size])
         start += size
     return result
+
+
+def _proximity_construction_groups(cfg: Config) -> tuple[DirectLayoutGroup, ...]:
+    """構成的初期化用に、同種キッチンカーを同じ配置単位へまとめる。"""
+
+    grouped: dict[tuple[str, str], list[int]] = {}
+    singletons: list[DirectLayoutGroup] = []
+    tables: dict[str, list[int]] = {}
+    for booth_id, booth in enumerate(cfg.booths):
+        area = str(booth.area)
+        group = booth.placement_group.strip()
+        if booth.is_table:
+            tables.setdefault(area, []).append(booth_id)
+        elif (
+            group
+            and booth.kind.strip().casefold() == "kitchen_car"
+            and not booth.is_waste_station
+        ):
+            grouped.setdefault((area, group), []).append(booth_id)
+        else:
+            singletons.append(DirectLayoutGroup(area, "active", (booth_id,)))
+    result = [
+        DirectLayoutGroup(area, f"type:{group}", tuple(members))
+        for (area, group), members in sorted(grouped.items())
+    ]
+    result.extend(singletons)
+    result.extend(
+        DirectLayoutGroup(area, "table", tuple(members))
+        for area, members in sorted(tables.items())
+    )
+    return tuple(result)
 
 
 def _try_place_boundary_chain(
@@ -1560,7 +1593,7 @@ def construct_random_orderly_layout(
     height, width = cfg.grid_height, cfg.grid_width
     walkable_types = set(int(value) for value in WALKABLE_TYPES)
     # activeとtableを用途別に3～5個の説明可能なモチーフへ構成する。
-    groups = direct_layout_groups(cfg, include_tables=True, combine_tables=False)
+    groups = _proximity_construction_groups(cfg)
     for _ in range(int(max_restarts)):
         restart_style = style or str(
             rng.choice(("lane", "perimeter", "hybrid"), p=(0.50, 0.20, 0.30))
@@ -1717,6 +1750,7 @@ def construct_random_orderly_layout(
                     venue,
                     positions,
                     geometry=geometry,
+                    enforce_same_type_proximity=True,
                 )
                 <= 0.0
                 and compute_direct_orderliness(
@@ -1735,7 +1769,7 @@ def construct_random_orderly_layout(
 
 
 class RandomFeasibleDirectSampling(Sampling):
-    """数理最適化を使わず、幾何＋1セル幅到達性を満たす初期集団を作る。"""
+    """幾何・到達性・同種近接を満たす初期集団を貪欲構成する。"""
 
     def __init__(
         self,
@@ -2098,35 +2132,47 @@ class DirectMultiScaleMutation(Mutation):
         """大域変異用の実行可能ドナーを返す。
 
         ドナー候補の不成立は通常の突然変異失敗であり、最適化全体を停止させる
-        エラーではない。計算時間が暴走しない範囲で再試行し、全候補が不成立なら
-        ``None`` を返して呼び出し元に元個体を維持させる。
+        エラーではない。整然配置は小さな試行予算だけを使い、不成立時は
+        キッチンカー専用種類を扱える高速な実行可能配置生成へ切り替える。
         """
 
-        donor_attempts = max(2, min(16, self.max_position_trials))
-        donor_restarts = max(50, min(500, self.max_position_trials * 10))
         should_generate = (
             len(self._donor_pool) < self.donor_pool_size
             or float(rng.random()) < self.donor_refresh_probability
         )
         if should_generate:
-            for _ in range(donor_attempts):
+            donor = None
+            try:
+                donor = construct_random_orderly_layout(
+                    self.cfg,
+                    rng,
+                    max_restarts=max(4, min(12, self.max_position_trials // 2)),
+                    lane_trials=max(40, min(100, self.max_position_trials * 3)),
+                )
+            except RuntimeError:
+                # 数百回の直列リスタートを避け、約0.1秒規模の貪欲生成へ退避する。
+                fallback = RandomFeasibleDirectSampling(
+                    self.cfg,
+                    seed=int(rng.integers(0, np.iinfo(np.int32).max)),
+                    max_trials_per_individual=max(1600, self.max_position_trials * 100),
+                    position_trials=max(100, self.max_position_trials * 4),
+                )
                 try:
-                    donor = construct_random_orderly_layout(
-                        self.cfg,
-                        rng,
-                        max_restarts=donor_restarts,
-                    )
+                    donor = fallback._do(problem, 1)[0]
                 except RuntimeError:
-                    continue
+                    donor = None
+
+            if donor is not None:
                 if not self._is_feasible(problem, donor):
-                    continue
-                if self._donor_pool:
+                    donor = None
+                elif self._donor_pool:
                     nearest = min(
                         normalized_layout_distance(self.cfg, donor, existing)
                         for existing in self._donor_pool
                     )
                     if nearest + 1.0e-12 < self.donor_minimum_distance:
-                        continue
+                        donor = None
+            if donor is not None:
                 if len(self._donor_pool) >= self.donor_pool_size:
                     replace_index = int(rng.integers(0, len(self._donor_pool)))
                     self._donor_pool[replace_index] = donor.copy()
@@ -2765,8 +2811,17 @@ def prepare_random_feasible_direct_population(
     return output
 
 
-def save_direct_metadata(result, out_dir: str | Path) -> None:
+def save_direct_metadata(
+    result,
+    out_dir: str | Path,
+    cfg: Config | None = None,
+) -> None:
     """直接設計値、整然さ内訳、最適化方式を保存する。"""
+
+    if cfg is None:
+        cfg = getattr(getattr(result, "problem", None), "cfg", None)
+    if cfg is None:
+        raise ValueError("save_direct_metadata requires cfg or result.problem.cfg")
 
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -2823,6 +2878,19 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
             "environmental_selection": "maximize_number_of_four_cell_reachable_booths_first",
             "simulation_walkable": "widest_available_path_per_target_in_order_4_3_2_1",
             "final_pareto_requirement": "all_booths_at_least_one_cell_reachable",
+        },
+        "same_type_proximity_constraint": {
+            "role": "hard_constraint_for_optimized_layouts",
+            "group_source": "booths.yaml placement_group",
+            "maximum_center_distance_meters": float(
+                cfg.same_type_max_distance_meters
+            ),
+            "exceptions": [
+                "non_kitchen_car",
+                "table",
+                "waste_station",
+                "singleton_group",
+            ],
         },
         "objectives": {
             "f_move": "mean_free_walk_seconds_from_attached_metrics",

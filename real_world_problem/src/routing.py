@@ -123,11 +123,15 @@ def _astar_python(
     goal_cells: set,
     lam: float,
     heuristic_field: np.ndarray,
+    crowd_risk: np.ndarray | None = None,
+    safe_occupancy_ratio: float = 1.0,
+    severe_congestion_weight: float = 0.0,
 ) -> list | None:
     """混雑を考慮した A*(§9.2)。
 
-    セル s へ進入するコスト: c = 1 + λ (n_s / C_s)^2。
-    n_s は経路計画時点の占有スナップショット(計画後は再計画まで固定)。
+    セル s へ進入するコストは、リスク r_s に対して
+    c = 1 + λ {r_s^2 + w max(0, (r_s-r_safe)/(1-r_safe))^2}。
+    crowd_risk が省略された場合は従来どおり r_s=n_s/C_s とする。
     ヒューリスティックは静的距離場(コスト >= 1/セルなので許容的)。
 
     Returns:
@@ -138,8 +142,15 @@ def _astar_python(
         return []
     H, W = walkable.shape
     sx, sy = start
-    ratio = occupancy.astype(np.float64) / capacity  # スナップショット
-    step_cost = 1.0 + lam * ratio * ratio
+    if crowd_risk is None:
+        risk = occupancy.astype(np.float64) / np.maximum(capacity, 1)
+    else:
+        risk = np.asarray(crowd_risk, dtype=np.float64)
+    excess_denom = max(1.0 - float(safe_occupancy_ratio), 1e-9)
+    excess = np.maximum(0.0, (risk - safe_occupancy_ratio) / excess_denom)
+    step_cost = 1.0 + lam * (
+        risk * risk + severe_congestion_weight * excess * excess
+    )
 
     g_score = np.full((H, W), np.inf)
     g_score[sy, sx] = 0.0
@@ -184,13 +195,14 @@ def _astar_python(
 @njit(cache=True)
 def _astar_kernel(
     walkable: np.ndarray,
-    occupancy: np.ndarray,
-    capacity: np.ndarray,
+    crowd_risk: np.ndarray,
     sx: int,
     sy: int,
     lam: float,
     heuristic_field: np.ndarray,
     inf_dist: int,
+    safe_occupancy_ratio: float,
+    severe_congestion_weight: float,
 ) -> tuple[np.ndarray, bool]:
     """Python版A*と同じ辞書順・浮動小数点式を平坦配列で実行する。"""
     H, W = walkable.shape
@@ -203,11 +215,15 @@ def _astar_kernel(
 
     n_cells = H * W
     step_cost = np.empty(n_cells, dtype=np.float64)
+    excess_denom = max(1.0 - safe_occupancy_ratio, 1e-9)
     for idx in range(n_cells):
         y = idx // W
         x = idx - y * W
-        ratio = float(occupancy[y, x]) / float(capacity[y, x])
-        step_cost[idx] = 1.0 + lam * ratio * ratio
+        risk = float(crowd_risk[y, x])
+        excess = max(0.0, (risk - safe_occupancy_ratio) / excess_denom)
+        step_cost[idx] = 1.0 + lam * (
+            risk * risk + severe_congestion_weight * excess * excess
+        )
 
     g_score = np.full(n_cells, np.inf, dtype=np.float64)
     came = np.full(n_cells, -1, dtype=np.int32)
@@ -279,8 +295,21 @@ def astar(
     goal_cells: set,
     lam: float,
     heuristic_field: np.ndarray,
+    crowd_risk: np.ndarray | None = None,
+    safe_occupancy_ratio: float = 1.0,
+    severe_congestion_weight: float = 0.0,
 ) -> list | None:
-    """混雑考慮A*。JIT版は元実装と同じ経路を返す。"""
+    """混雑予測を考慮したA*。JIT版はPython版と同じ経路を返す。
+
+    ``crowd_risk`` を省略すると、従来の占有率 ``occupancy/capacity`` を使う。
+    したがって既存の呼び出し側には後方互換である。
+    """
+    if crowd_risk is None:
+        risk = occupancy.astype(np.float64) / np.maximum(capacity, 1)
+    else:
+        risk = np.asarray(crowd_risk, dtype=np.float64)
+        if risk.shape != walkable.shape:
+            raise ValueError("crowd_risk must have the same shape as walkable")
     if not NUMBA_AVAILABLE:
         return _astar_python(
             walkable,
@@ -290,24 +319,49 @@ def astar(
             goal_cells,
             lam,
             heuristic_field,
+            risk,
+            safe_occupancy_ratio,
+            severe_congestion_weight,
         )
     if start in goal_cells:
         return []
     sx, sy = (int(start[0]), int(start[1]))
     flat_path, found = _astar_kernel(
         np.ascontiguousarray(walkable, dtype=np.bool_),
-        np.ascontiguousarray(occupancy),
-        np.ascontiguousarray(capacity),
+        np.ascontiguousarray(risk, dtype=np.float64),
         sx,
         sy,
         float(lam),
         np.ascontiguousarray(heuristic_field, dtype=np.int32),
         int(INF_DIST),
+        float(safe_occupancy_ratio),
+        float(severe_congestion_weight),
     )
     if not found:
         return None
     W = int(walkable.shape[1])
     return [(int(idx % W), int(idx // W)) for idx in flat_path]
+
+
+def route_cost(
+    path,
+    crowd_risk: np.ndarray,
+    lam: float,
+    safe_occupancy_ratio: float,
+    severe_congestion_weight: float,
+) -> float:
+    """A* と同じ式で、現在セルを含まない経路の予想コストを返す。"""
+    if not path:
+        return 0.0
+    excess_denom = max(1.0 - float(safe_occupancy_ratio), 1e-9)
+    total = 0.0
+    for x, y in path:
+        risk = float(crowd_risk[y, x])
+        excess = max(0.0, (risk - safe_occupancy_ratio) / excess_denom)
+        total += 1.0 + lam * (
+            risk * risk + severe_congestion_weight * excess * excess
+        )
+    return total
 
 
 def _descend_path_python(dist_field: np.ndarray, start: tuple) -> list:

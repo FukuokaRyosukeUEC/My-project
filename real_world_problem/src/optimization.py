@@ -36,6 +36,7 @@ from .venue import (
     booth_cells_of,
     booth_exit_cell,
     build_base_venue,
+    oriented_booth_size,
     position_bounds,
     queue_cells_of,
     reception_cell,
@@ -359,19 +360,45 @@ def _greedy_layout_attempt(
         dtype=bool,
     )
 
-    order = sorted(
-        range(n_booths),
-        key=lambda b: (
-            -(
-                cfg.booths[b].width
-                * cfg.booths[b].height
+    # 対象キッチンカーを連続して配置し、2店舗目以降を設定距離以内へ
+    # サンプリングできるよう、グループを1つの配置単位として並べる。
+    grouped: dict[str, list[int]] = {}
+    ungrouped: list[int] = []
+    for booth_id, booth in enumerate(cfg.booths):
+        group = booth.placement_group.strip()
+        if (
+            group
+            and booth.kind.strip().casefold() == "kitchen_car"
+            and not booth.is_table
+            and not booth.is_waste_station
+        ):
+            grouped.setdefault(group, []).append(booth_id)
+        else:
+            ungrouped.append(booth_id)
+    units = list(grouped.values()) + [[booth_id] for booth_id in ungrouped]
+    units.sort(
+        key=lambda members: (
+            -max(
+                cfg.booths[booth_id].width * cfg.booths[booth_id].height
+                for booth_id in members
             ),
             rng.random(),
-        ),
+        )
     )
+    order = [
+        booth_id
+        for members in units
+        for booth_id in sorted(
+            members,
+            key=lambda value: -(
+                cfg.booths[value].width * cfg.booths[value].height
+            ),
+        )
+    ]
 
     positions = np.empty((n_booths, 3), dtype=np.int64)
 
+    placed_by_group: dict[str, list[int]] = {}
     for booth_id in order:
         placed = False
 
@@ -414,19 +441,44 @@ def _greedy_layout_attempt(
             ):
                 continue
 
-            x = int(
-                rng.integers(
-                    xmin,
-                    xmax + 1,
+            group = cfg.booths[booth_id].placement_group.strip()
+            anchors = placed_by_group.get(group, ()) if group else ()
+            if anchors:
+                anchor_id = int(anchors[int(rng.integers(0, len(anchors)))])
+                anchor_x, anchor_y, anchor_theta = positions[anchor_id]
+                anchor_width, anchor_height = oriented_booth_size(
+                    cfg,
+                    anchor_id,
+                    int(anchor_theta),
                 )
-            )
-
-            y = int(
-                rng.integers(
-                    ymin,
-                    ymax + 1,
+                booth_width, booth_height = oriented_booth_size(
+                    cfg,
+                    booth_id,
+                    theta,
                 )
-            )
+                maximum_cells = (
+                    cfg.same_type_max_distance_meters / cfg.cell_size_meters
+                )
+                # 重なりを避けやすい上限距離の半分～上限を中心に候補を作り、
+                # 丸め後の実中心距離も下で再検査する。
+                minimum_radius = min(maximum_cells, max(2.0, maximum_cells * 0.5))
+                radius = float(rng.uniform(minimum_radius, maximum_cells))
+                angle = float(rng.uniform(0.0, 2.0 * np.pi))
+                center_x = float(anchor_x) + anchor_width / 2.0
+                center_y = float(anchor_y) + anchor_height / 2.0
+                x = int(round(center_x + radius * np.cos(angle) - booth_width / 2.0))
+                y = int(round(center_y + radius * np.sin(angle) - booth_height / 2.0))
+                if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                    continue
+                actual_distance = np.hypot(
+                    (x + booth_width / 2.0) - center_x,
+                    (y + booth_height / 2.0) - center_y,
+                ) * cfg.cell_size_meters
+                if actual_distance > cfg.same_type_max_distance_meters + 1.0e-9:
+                    continue
+            else:
+                x = int(rng.integers(xmin, xmax + 1))
+                y = int(rng.integers(ymin, ymax + 1))
 
             if _booth_fits(
                 cfg,
@@ -447,6 +499,15 @@ def _greedy_layout_attempt(
                     occupied[cy, cx] = True
 
                 positions[booth_id] = (x, y, theta)
+
+                if (
+                    group
+                    and cfg.booths[booth_id].kind.strip().casefold()
+                    == "kitchen_car"
+                    and not cfg.booths[booth_id].is_table
+                    and not cfg.booths[booth_id].is_waste_station
+                ):
+                    placed_by_group.setdefault(group, []).append(booth_id)
 
                 placed = True
                 break

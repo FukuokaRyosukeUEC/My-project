@@ -17,26 +17,29 @@
 #   そのまま表す。全ブース南向き(2)で正面が南辺(=長辺)を向く。
 #   scripts/run_fixed_layout.py がこの座標で人流シミュレーションを行う。
 #   最適化(run_optimization.py)ではこの値は使わず座標・向きを変数として扱う。
-# - attractiveness / capacity / mean_service_seconds / max_queue_length は
-#   暫定値(ブース条件は後で詰める)。
+# - attractiveness / capacity / mean_service_seconds は、店舗種類ごとの
+#   初期仮説。実測した利用者数・提供時間が得られたら再調整する。
+# - placement_group: 通常キッチンカー2台だけを通常ブースとは別種類として扱い、
+#   最適化時に5m以内へ近接させる。他のキッチンカー、通常ブース、
+#   テーブル、ゴミステーションには指定しない。
 #
 # 待機列は L 字形(左辺→上辺→右辺、南辺は空けておく)。実寸 2x3 ブースの
 # 待機列は最大 5 セル、実寸 3x7 ブースは最大 8 セルに設定。
 booths:
   # ================= 上部広場: ブース 12 個(実寸2×3) + 大型 1 個(実寸3×7) =================
-  - {booth_id: 0,  name: 上部ブース1,  width: 3, height: 2, category: goods,   attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 11, 1]}
-  - {booth_id: 1,  name: 上部ブース2,  width: 3, height: 2, category: goods,   attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 25, 1]}
-  - {booth_id: 2,  name: 上部ブース3,  width: 3, height: 2, category: goods,   attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [26, 11, 2]}
-  - {booth_id: 3,  name: 上部ブース4,  width: 3, height: 2, category: goods,   attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [30, 11, 2]}
-  - {booth_id: 4,  name: 上部ブース5,  width: 3, height: 2, category: workshop, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 15, 1]}
-  - {booth_id: 5,  name: 上部ブース6,  width: 3, height: 2, category: workshop, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 29, 1]}
-  - {booth_id: 6,  name: 上部ブース7,  width: 3, height: 2, category: workshop, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [35, 14, 2]}
-  - {booth_id: 7,  name: 上部ブース8,  width: 3, height: 2, category: workshop, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [39, 17, 2]}
-  - {booth_id: 8,  name: 上部ブース9,  width: 3, height: 2, category: goods,   attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 19, 1]}
-  - {booth_id: 9,  name: 上部ブース10, width: 3, height: 2, category: goods,   attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 33, 1]}
-  - {booth_id: 10, name: 上部ブース11, width: 3, height: 2, category: goods,   attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [42, 22, 3]}
-  - {booth_id: 11, name: 上部ブース12, width: 3, height: 2, category: goods,   attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [42, 26, 3]}
-  - {booth_id: 12, name: 上部大型ブース, width: 7, height: 3, category: exhibit, attractiveness: 0.9, capacity: 6, mean_service_seconds: 60, max_queue_length: 8, kind: booth, theme: normal, area: upper_plaza, fixed_position: [30, 33, 0]}
+  - {booth_id: 0,  name: 上部ブース1,  width: 3, height: 2, category: goods,   attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 11, 1]}
+  - {booth_id: 1,  name: 上部ブース2,  width: 3, height: 2, category: goods,   attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 25, 1]}
+  - {booth_id: 2,  name: 上部ブース3,  width: 3, height: 2, category: goods,   attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [26, 11, 2]}
+  - {booth_id: 3,  name: 上部ブース4,  width: 3, height: 2, category: goods,   attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [30, 11, 2]}
+  - {booth_id: 4,  name: 上部ブース5,  width: 3, height: 2, category: workshop, attractiveness: 0.75, capacity: 4, mean_service_seconds: 90, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 15, 1]}
+  - {booth_id: 5,  name: 上部ブース6,  width: 3, height: 2, category: workshop, attractiveness: 0.75, capacity: 4, mean_service_seconds: 90, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 29, 1]}
+  - {booth_id: 6,  name: 上部ブース7,  width: 3, height: 2, category: workshop, attractiveness: 0.75, capacity: 4, mean_service_seconds: 90, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [35, 14, 2]}
+  - {booth_id: 7,  name: 上部ブース8,  width: 3, height: 2, category: workshop, attractiveness: 0.75, capacity: 4, mean_service_seconds: 90, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [39, 17, 2]}
+  - {booth_id: 8,  name: 上部ブース9,  width: 3, height: 2, category: goods,   attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 19, 1]}
+  - {booth_id: 9,  name: 上部ブース10, width: 3, height: 2, category: goods,   attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [17, 33, 1]}
+  - {booth_id: 10, name: 上部ブース11, width: 3, height: 2, category: goods,   attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [42, 22, 3]}
+  - {booth_id: 11, name: 上部ブース12, width: 3, height: 2, category: goods,   attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: upper_plaza, fixed_position: [42, 26, 3]}
+  - {booth_id: 12, name: 上部大型ブース, width: 7, height: 3, category: exhibit, attractiveness: 0.88, capacity: 12, mean_service_seconds: 120, max_queue_length: 8, kind: booth, theme: normal, area: upper_plaza, fixed_position: [30, 33, 0]}
   # ================= 上部広場: テーブル・椅子 3 個(2×2) =================
   - {booth_id: 13, name: 上部テーブル1, width: 2, height: 2, capacity: 4, kind: table, area: upper_plaza, fixed_position: [24, 19]}
   - {booth_id: 14, name: 上部テーブル2, width: 2, height: 2, capacity: 4, kind: table, area: upper_plaza, fixed_position: [28, 19]}
@@ -44,21 +47,21 @@ booths:
   # ================= 下部広場: ブース 15 個(2×3) =================
   # 属性: キッチンカー(通常)×2、キッチンカー(音楽祭)×2、音楽祭ジャズブース×1、
   #       音楽祭ゴミステーション×1、国際音楽祭屋台×3、通常ブース×6
-  - {booth_id: 16, name: キッチンカー1,       width: 3, height: 2, category: food,  attractiveness: 0.8, capacity: 2, mean_service_seconds: 60, max_queue_length: 5, kind: kitchen_car, theme: normal, area: lower_plaza, fixed_position: [43, 51, 3]}
-  - {booth_id: 17, name: キッチンカー2,       width: 3, height: 2, category: food,  attractiveness: 0.8, capacity: 2, mean_service_seconds: 60, max_queue_length: 5, kind: kitchen_car, theme: normal, area: lower_plaza, fixed_position: [44, 56, 3]}
-  - {booth_id: 18, name: 音楽祭キッチンカー1, width: 3, height: 2, category: food,  attractiveness: 0.8, capacity: 2, mean_service_seconds: 60, max_queue_length: 5, kind: kitchen_car, theme: 音楽祭, area: lower_plaza, fixed_position: [38, 67, 0]}
-  - {booth_id: 19, name: 音楽祭キッチンカー2, width: 3, height: 2, category: food,  attractiveness: 0.8, capacity: 2, mean_service_seconds: 60, max_queue_length: 5, kind: kitchen_car, theme: 音楽祭, area: lower_plaza, fixed_position: [34, 72, 0]}
-  - {booth_id: 20, name: 音楽祭ジャズブース,      width: 3, height: 2, category: music, attractiveness: 0.8, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: ジャズ,        area: lower_plaza, fixed_position: [33, 63, 0]}
-  - {booth_id: 21, name: ゴミステーション, width: 3, height: 2, category: music, attractiveness: 0.8, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: ゴミステーション, area: lower_plaza, fixed_position: [30, 66, 3]}
-  - {booth_id: 22, name: 下部ブース1, width: 3, height: 2, category: goods, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 45, 1]}
-  - {booth_id: 23, name: 下部ブース2, width: 3, height: 2, category: goods, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 49, 1]}
-  - {booth_id: 24, name: 下部ブース3, width: 3, height: 2, category: goods, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 53, 1]}
-  - {booth_id: 25, name: 下部ブース4, width: 3, height: 2, category: goods, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 58, 1]}
-  - {booth_id: 26, name: 下部ブース5, width: 3, height: 2, category: goods, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 62, 1]}
-  - {booth_id: 27, name: 下部ブース6, width: 3, height: 2, category: goods, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 66, 1]}
-  - {booth_id: 28, name: 国際音楽祭屋台1, width: 3, height: 2, category: food, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: kitchen_car, theme: 国際音楽祭屋台, area: lower_plaza, fixed_position: [17, 71, 1]}
-  - {booth_id: 29, name: 国際音楽祭屋台2, width: 3, height: 2, category: food, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: kitchen_car, theme: 国際音楽祭屋台, area: lower_plaza, fixed_position: [17, 75, 1]}
-  - {booth_id: 30, name: 国際音楽祭屋台3, width: 3, height: 2, category: food, attractiveness: 0.7, capacity: 2, mean_service_seconds: 30, max_queue_length: 5, kind: kitchen_car, theme: 国際音楽祭屋台, area: lower_plaza, fixed_position: [17, 79, 1]}
+  - {booth_id: 16, name: キッチンカー1,       width: 3, height: 2, category: food,  attractiveness: 0.90, capacity: 2, mean_service_seconds: 75, max_queue_length: 5, kind: kitchen_car, theme: normal, placement_group: normal_kitchen_car, area: lower_plaza, fixed_position: [43, 51, 3]}
+  - {booth_id: 17, name: キッチンカー2,       width: 3, height: 2, category: food,  attractiveness: 0.90, capacity: 2, mean_service_seconds: 75, max_queue_length: 5, kind: kitchen_car, theme: normal, placement_group: normal_kitchen_car, area: lower_plaza, fixed_position: [44, 56, 3]}
+  - {booth_id: 18, name: 音楽祭キッチンカー1, width: 3, height: 2, category: food,  attractiveness: 0.95, capacity: 2, mean_service_seconds: 90, max_queue_length: 5, kind: kitchen_car, theme: 音楽祭, area: lower_plaza, fixed_position: [38, 67, 0]}
+  - {booth_id: 19, name: 音楽祭キッチンカー2, width: 3, height: 2, category: food,  attractiveness: 0.95, capacity: 2, mean_service_seconds: 90, max_queue_length: 5, kind: kitchen_car, theme: 音楽祭, area: lower_plaza, fixed_position: [34, 72, 0]}
+  - {booth_id: 20, name: 音楽祭ジャズブース, width: 3, height: 2, category: music, attractiveness: 0.82, capacity: 12, mean_service_seconds: 120, max_queue_length: 5, kind: booth, theme: ジャズ, area: lower_plaza, fixed_position: [33, 63, 0]}
+  - {booth_id: 21, name: ゴミステーション, width: 3, height: 2, category: none, attractiveness: 0.0, capacity: 2, mean_service_seconds: 15, max_queue_length: 3, kind: waste_station, theme: normal, area: lower_plaza, fixed_position: [30, 66, 3]}
+  - {booth_id: 22, name: 下部ブース1, width: 3, height: 2, category: goods, attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 45, 1]}
+  - {booth_id: 23, name: 下部ブース2, width: 3, height: 2, category: goods, attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 49, 1]}
+  - {booth_id: 24, name: 下部ブース3, width: 3, height: 2, category: goods, attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 53, 1]}
+  - {booth_id: 25, name: 下部ブース4, width: 3, height: 2, category: goods, attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 58, 1]}
+  - {booth_id: 26, name: 下部ブース5, width: 3, height: 2, category: goods, attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 62, 1]}
+  - {booth_id: 27, name: 下部ブース6, width: 3, height: 2, category: goods, attractiveness: 0.60, capacity: 2, mean_service_seconds: 45, max_queue_length: 5, kind: booth, theme: normal, area: lower_plaza, fixed_position: [17, 66, 1]}
+  - {booth_id: 28, name: 国際音楽祭屋台1, width: 3, height: 2, category: food, attractiveness: 0.85, capacity: 2, mean_service_seconds: 60, max_queue_length: 5, kind: kitchen_car, theme: 国際音楽祭屋台, area: lower_plaza, fixed_position: [17, 71, 1]}
+  - {booth_id: 29, name: 国際音楽祭屋台2, width: 3, height: 2, category: food, attractiveness: 0.85, capacity: 2, mean_service_seconds: 60, max_queue_length: 5, kind: kitchen_car, theme: 国際音楽祭屋台, area: lower_plaza, fixed_position: [17, 75, 1]}
+  - {booth_id: 30, name: 国際音楽祭屋台3, width: 3, height: 2, category: food, attractiveness: 0.85, capacity: 2, mean_service_seconds: 60, max_queue_length: 5, kind: kitchen_car, theme: 国際音楽祭屋台, area: lower_plaza, fixed_position: [17, 79, 1]}
   # ================= 下部広場: テーブル・椅子 15 個(2×2) =================
   - {booth_id: 31, name: 下部テーブル1,  width: 2, height: 2, capacity: 4, kind: table, area: lower_plaza, fixed_position: [22, 46]}
   - {booth_id: 32, name: 下部テーブル2,  width: 2, height: 2, capacity: 4, kind: table, area: lower_plaza, fixed_position: [22, 54]}

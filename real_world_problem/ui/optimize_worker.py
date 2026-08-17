@@ -367,7 +367,7 @@ def main() -> None:
                 message="成果物(パレート解 CSV・代表解 JSON)を書き出し中",
             )
             save_results(cfg, res, rd / "results")
-            save_direct_metadata(res, rd / "results")
+            save_direct_metadata(res, rd / "results", cfg=cfg)
 
         run_store.write_status(
             rd,
