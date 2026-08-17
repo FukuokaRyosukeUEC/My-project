@@ -1,0 +1,85 @@
+C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py:30: DeprecationWarning: Importing 'StarmapParallelization' from 'pymoo.core.problem' is deprecated. Please use 'from pymoo.parallelization import StarmapParallelization' instead. This backward compatibility import will be removed in a future version.
+  from pymoo.core.problem import StarmapParallelization  # noqa: E402
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+                    ^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\pool.py", line 51, in starmapstar
+    return list(itertools.starmap(args[0], args[1]))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\problem.py", line 30, in __call__
+    self.problem._evaluate(x, out, *self.args, **self.kwargs)
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 1438, in _evaluate
+    simulation = evaluate_layout(
+                 ^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\parallel.py", line 106, in evaluate_layout
+    result = sim.run()
+             ^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\simulator.py", line 378, in run
+    self._decision_step(t)
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\simulator.py", line 615, in _decision_step
+    self._choose_target(v, t)
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\simulator.py", line 674, in _choose_target
+    path = astar(
+           ^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\routing.py", line 297, in astar
+    flat_path, found = _astar_kernel(
+                       ^^^^^^^^^^^^^^
+MemoryError: Allocation failed (probably too large).
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 397, in <module>
+    main()
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 334, in main
+    res = _run_direct(
+          ^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 76, in _run_direct
+    return run_direct_nsga2(
+           ^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 2717, in run_direct_nsga2
+    result = minimize(
+             ^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\optimize.py", line 48, in minimize
+    res = algorithm.run()
+          ^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\algorithm.py", line 145, in run
+    self.next()
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\algorithm.py", line 166, in next
+    self.evaluator.eval(self.problem, infills, algorithm=self)
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\evaluator.py", line 83, in eval
+    self._eval(problem, pop[I], evaluate_values_of, **kwargs)
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\evaluator.py", line 104, in _eval
+    out = problem.evaluate(
+          ^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\problem.py", line 176, in evaluate
+    _out = self.do(X, return_values_of, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\problem.py", line 215, in do
+    self._evaluate_elementwise(X, out, *args, **kwargs)
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\problem.py", line 233, in _evaluate_elementwise
+    elems = self.elementwise_runner(f, X)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\parallelization\starmap.py", line 15, in __call__
+    return list(self.starmap(f, [[x] for x in X]))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\pool.py", line 375, in starmap
+    return self._map_async(func, iterable, starmapstar, chunksize).get()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\pool.py", line 774, in get
+    raise self._value
+MemoryError: Allocation failed (probably too large).
+実会場配置の比較は無効: booths.yaml に fixed_position が未設定のブースがあります(booth_id: [0, 1, 2, 3, 4]…)
+==========================================================================================
+n_gen  |  n_eval  | n_nds  |     cv_min    |     cv_avg    |      eps      |   indicator  
+==========================================================================================
+     1 |      100 |      1 |  0.000000E+00 |  0.000000E+00 |             - |             -
+     2 |      200 |      2 |  0.000000E+00 |  0.000000E+00 |  4.6034482759 |         ideal
+     3 |      300 |      4 |  0.000000E+00 |  0.000000E+00 |  0.8692186424 |         ideal
+     4 |      400 |      1 |  0.000000E+00 |  0.000000E+00 |  1.8741166667 |         ideal

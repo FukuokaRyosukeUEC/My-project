@@ -1,0 +1,197 @@
+C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py:30: DeprecationWarning: Importing 'StarmapParallelization' from 'pymoo.core.problem' is deprecated. Please use 'from pymoo.parallelization import StarmapParallelization' instead. This backward compatibility import will be removed in a future version.
+  from pymoo.core.problem import StarmapParallelization  # noqa: E402
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 244, in prepare
+    _fixup_main_from_name(data['init_main_from_name'])
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 268, in _fixup_main_from_name
+    main_content = runpy.run_module(mod_name,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 226, in run_module
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 37, in <module>
+    from src.direct_optimization import (  # noqa: E402
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 20, in <module>
+    from pymoo.algorithms.moo.nsga2 import NSGA2
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\algorithms\moo\nsga2.py", line 9, in <module>
+    from pymoo.operators.survival.rank_and_crowding import RankAndCrowding
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\operators\survival\rank_and_crowding\__init__.py", line 3, in <module>
+    from pymoo.operators.survival.rank_and_crowding.classes import (
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\operators\survival\rank_and_crowding\classes.py", line 7, in <module>
+    from pymoo.operators.survival.rank_and_crowding.metrics import get_crowding_function
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\operators\survival\rank_and_crowding\metrics.py", line 4, in <module>
+    from scipy.spatial.distance import pdist, squareform
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\scipy\spatial\__init__.py", line 113, in <module>
+    from ._qhull import *
+  File "scipy/spatial/_qhull.pyx", line 1, in init scipy.spatial._qhull
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\scipy\linalg\__init__.py", line 201, in <module>
+    from ._misc import *
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\scipy\linalg\_misc.py", line 3, in <module>
+    from .blas import get_blas_funcs
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\scipy\linalg\blas.py", line 224, in <module>
+    from scipy.linalg import _fblas
+ImportError: DLL load failed while importing _fblas: ページング ファイルが小さすぎるため、この操作を完了できません。
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 244, in prepare
+    _fixup_main_from_name(data['init_main_from_name'])
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 268, in _fixup_main_from_name
+    main_content = runpy.run_module(mod_name,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 226, in run_module
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 37, in <module>
+    from src.direct_optimization import (  # noqa: E402
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 19, in <module>
+    import pandas as pd
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pandas\__init__.py", line 61, in <module>
+    from pandas.core.api import (
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pandas\core\api.py", line 47, in <module>
+    from pandas.core.groupby import (
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pandas\core\groupby\__init__.py", line 1, in <module>
+    from pandas.core.groupby.generic import (
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pandas\core\groupby\generic.py", line 69, in <module>
+    from pandas.core.groupby import (
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pandas\core\groupby\ops.py", line 26, in <module>
+    import pandas._libs.groupby as libgroupby
+ImportError: DLL load failed while importing groupby: ページング ファイルが小さすぎるため、この操作を完了できません。
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 122, in spawn_main
+    exitcode = _main(fd, parent_sentinel)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 131, in _main
+    prepare(preparation_data)
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 244, in prepare
+    _fixup_main_from_name(data['init_main_from_name'])
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\multiprocessing\spawn.py", line 268, in _fixup_main_from_name
+    main_content = runpy.run_module(mod_name,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen runpy>", line 226, in run_module
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 37, in <module>
+    from src.direct_optimization import (  # noqa: E402
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 20, in <module>
+    from pymoo.algorithms.moo.nsga2 import NSGA2
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\algorithms\moo\nsga2.py", line 9, in <module>
+    from pymoo.operators.survival.rank_and_crowding import RankAndCrowding
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\operators\survival\rank_and_crowding\__init__.py", line 3, in <module>
+    from pymoo.operators.survival.rank_and_crowding.classes import (
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\operators\survival\rank_and_crowding\classes.py", line 7, in <module>
+    from pymoo.operators.survival.rank_and_crowding.metrics import get_crowding_function
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\operators\survival\rank_and_crowding\metrics.py", line 4, in <module>
+    from scipy.spatial.distance import pdist, squareform
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\scipy\spatial\__init__.py", line 113, in <module>
+    from ._qhull import *
+  File "scipy/spatial/_qhull.pyx", line 1, in init scipy.spatial._qhull
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\scipy\linalg\__init__.py", line 201, in <module>
+    from ._misc import *
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\scipy\linalg\_misc.py", line 3, in <module>
+    from .blas import get_blas_funcs
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\scipy\linalg\blas.py", line 224, in <module>
+    from scipy.linalg import _fblas
+ImportError: DLL load failed while importing _fblas: ページング ファイルが小さすぎるため、この操作を完了できません。
+Process SpawnPoolWorker-9:
+Process SpawnPoolWorker-4:
+Process SpawnPoolWorker-22:
+Process SpawnPoolWorker-6:
+Process SpawnPoolWorker-10:
+Process SpawnPoolWorker-20:
+Process SpawnPoolWorker-21:
+Process SpawnPoolWorker-3:
+Process SpawnPoolWorker-1:
+Process SpawnPoolWorker-15:
+Process SpawnPoolWorker-11:
+Process SpawnPoolWorker-2:
+Process SpawnPoolWorker-23:
+Process SpawnPoolWorker-18:
+Process SpawnPoolWorker-12:
+Process SpawnPoolWorker-7:
+Process SpawnPoolWorker-8:
+Process SpawnPoolWorker-5:
+Process SpawnPoolWorker-13:
+Process SpawnPoolWorker-19:
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 397, in <module>
+    main()
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 334, in main
+    res = _run_direct(
+          ^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\ui\optimize_worker.py", line 76, in _run_direct
+    return run_direct_nsga2(
+           ^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 2709, in run_direct_nsga2
+    result = minimize(
+             ^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\optimize.py", line 48, in minimize
+    res = algorithm.run()
+          ^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\algorithm.py", line 145, in run
+    self.next()
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\algorithm.py", line 162, in next
+    infills = self.infill()
+              ^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\algorithm.py", line 197, in infill
+    infills = self._infill()
+              ^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\algorithms\base\genetic.py", line 98, in _infill
+    off = self.mating.do(
+          ^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\infill.py", line 49, in do
+    _off = self._do(
+           ^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\mating.py", line 47, in _do
+    off = self.mutation(problem, off, random_state=random_state, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\operator.py", line 38, in __call__
+    out = self.do(problem, elem, *args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\util\__init__.py", line 35, in wrapper
+    return func(*args, random_state=random_state, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\pymoo\core\mutation.py", line 35, in do
+    Xp = self._do(problem, X, *args, random_state=random_state, **kwargs)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 2343, in _do
+    self._mutate_macro(problem, output[row], rng)
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 2314, in _mutate_macro
+    succeeded = self._macro_area_reseed(problem, x, rng)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 2232, in _macro_area_reseed
+    donor = self._random_donor(problem, rng)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 2203, in _random_donor
+    donor = construct_random_orderly_layout(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\real_world_problem\src\direct_optimization.py", line 1697, in construct_random_orderly_layout
+    rng.choice((0, 2) if axis == "H" else (1, 3))
+  File "numpy\\random\\_generator.pyx", line 850, in numpy.random._generator.Generator.choice
+  File "numpy\\random\\_generator.pyx", line 624, in numpy.random._generator.Generator.integers
+  File "numpy\\random\\_bounded_integers.pyx", line 2663, in numpy.random._bounded_integers._rand_int64
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\numpy\core\fromnumeric.py", line 3100, in prod
+    return _wrapreduction(a, np.multiply, 'prod', axis, dtype, out,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\hyoud\UPoC2026\U_PoC2026_YMFS\.venv\Lib\site-packages\numpy\core\fromnumeric.py", line 71, in _wrapreduction
+    def _wrapreduction(obj, ufunc, method, axis, dtype, out, **kwargs):
+    
+KeyboardInterrupt
+実会場配置(booths.yaml): f_move = 91.380000, f_congestion = 2.862500e-01
+==========================================================================================
+n_gen  |  n_eval  | n_nds  |     cv_min    |     cv_avg    |      eps      |   indicator  
+==========================================================================================
+     1 |       20 |      4 |  0.000000E+00 |  0.000000E+00 |             - |             -

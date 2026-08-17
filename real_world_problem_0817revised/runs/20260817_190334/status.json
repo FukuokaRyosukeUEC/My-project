@@ -1,0 +1,1 @@
+{"state": "done", "message": "直接配置NSGA-IIが完了しました", "generation": 20, "updated_at": 1786961335.2422762, "n_generations": 20, "started_at": 82796.8978588, "elapsed_seconds": 320.02775900000415, "n_pareto": 5, "method": "single_level_direct_120_layout_nsga2"}

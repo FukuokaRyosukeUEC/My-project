@@ -1,0 +1,2 @@
+x0,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10,x11,x12,x13,x14,x15,x16,x17,f_move,f_congestion,mean_queue_seconds,mean_blocked_seconds,experience_success_rate,give_up_total,max_cell_occupancy_ratio,mean_happiness
+9,11,1,7,1,2,15,9,2,2,4,0,1,10,1,11,4,2,19.972500000000004,0.07222222222222222,12.41,0.0,0.9897959183673469,4,0.6666666666666666,1.7279747416383981
