@@ -22,6 +22,7 @@ from .venue import (
     apply_layout,
     booth_cells_of,
     booth_exit_cell,
+    front_clearance_cells,
     queue_cells_of,
     reception_cell,
     table_access_cells_of,
@@ -43,6 +44,7 @@ class PlacementGeometry:
     booth_exits: tuple[tuple[int, int] | None, ...]
     queue_cells: tuple[tuple[tuple[int, int], ...], ...]
     table_access_cells: tuple[tuple[tuple[int, int], ...], ...]
+    front_clearance_cells: tuple[tuple[tuple[int, int], ...], ...]
     claimed_cells: tuple[frozenset[tuple[int, int]], ...]
 
 
@@ -76,6 +78,10 @@ def build_placement_geometry(
         tuple(table_access_cells_of(cfg, booth_id, *normalized[booth_id]))
         for booth_id in range(len(cfg.booths))
     )
+    front_clearances = tuple(
+        tuple(front_clearance_cells(cfg, booth_id, *normalized[booth_id]))
+        for booth_id in range(len(cfg.booths))
+    )
     claimed_cells = []
     for booth_id in range(len(cfg.booths)):
         claimed = set(booth_cells[booth_id])
@@ -93,6 +99,7 @@ def build_placement_geometry(
         booth_exits=booth_exits,
         queue_cells=queue_cells,
         table_access_cells=table_access_cells,
+        front_clearance_cells=front_clearances,
         claimed_cells=tuple(claimed_cells),
     )
 
@@ -223,6 +230,7 @@ def compute_violation(
     booth_exits = geom.booth_exits
     qcells = geom.queue_cells
     table_access_cells = geom.table_access_cells
+    front_clearances = geom.front_clearance_cells
 
     # 使用セル集合(受付+行列): 相互重複チェック用
     claim_count = np.zeros((H, W), dtype=np.int16)  # 場内セルの多重使用数
@@ -284,6 +292,24 @@ def compute_violation(
             for (x, y) in booth_cells[b]:
                 if _in_bounds(cfg, x, y) and not mask[y, x]:
                     g += 1
+
+    # --- ブース正面2セル空間: 場内の通行可能領域に置き、他配置物の侵入を禁止
+    # 正面空間同士は共有通路として重なってよい。当該ブース自身の受付・退出口・
+    # 待機列も許可し、他ブースが使用しているセルだけを違反として数える。
+    walkable_types = set(int(value) for value in WALKABLE_TYPES)
+    for booth_id, cells in enumerate(front_clearances):
+        own_claimed = geom.claimed_cells[booth_id]
+        for x_pos, y_pos in cells:
+            if not _in_bounds(cfg, x_pos, y_pos):
+                g += 1
+                continue
+            if int(base[y_pos, x_pos]) not in walkable_types:
+                g += 1
+            other_claims = int(claim_count[y_pos, x_pos]) - int(
+                (x_pos, y_pos) in own_claimed
+            )
+            if other_claims > 0:
+                g += other_claims
 
     if g > 0:
         return g  # 幾何違反があれば到達性チェックは行わない(高速化)

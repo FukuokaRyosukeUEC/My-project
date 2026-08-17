@@ -34,6 +34,11 @@ THETA_WEST = 3
 #:     環境選択の第 1 キー(-width4_counts)が全個体で同値になり無効化される。
 TARGET_CORRIDOR_WIDTH_CELLS = 1
 
+#: ブース正面に常時確保する受付・整列・通行用空間の奥行き。
+#: 正面空間同士は共用できるが、他ブースの本体・受付・退出口・待機列は
+#: この領域へ侵入できない。
+FRONT_CLEARANCE_DEPTH_CELLS = 2
+
 VALID_THETAS = (
     THETA_NORTH,
     THETA_EAST,
@@ -88,6 +93,51 @@ def oriented_booth_size(
         return spec.width, spec.height
 
     return spec.height, spec.width
+
+
+def front_clearance_cells(
+    cfg: Config,
+    booth_id: int,
+    x_pos: int,
+    y_pos: int,
+    theta: int,
+    depth: int = FRONT_CLEARANCE_DEPTH_CELLS,
+) -> tuple[tuple[int, int], ...]:
+    """ブース正面幅全体に確保する、奥行き ``depth`` の空間を返す。
+
+    正面を持たないテーブル・椅子には適用しない。受付・退出口など当該ブース
+    自身の設備は置けるが、他の配置物がこの領域へ侵入する配置は物理制約違反
+    として扱う。
+    """
+
+    if cfg.booths[booth_id].is_table:
+        return ()
+    width, height = oriented_booth_size(cfg, booth_id, int(theta))
+    if int(theta) == THETA_NORTH:
+        cells = [
+            (x_value, y_pos - offset)
+            for offset in range(1, int(depth) + 1)
+            for x_value in range(x_pos, x_pos + width)
+        ]
+    elif int(theta) == THETA_EAST:
+        cells = [
+            (x_pos + width - 1 + offset, y_value)
+            for offset in range(1, int(depth) + 1)
+            for y_value in range(y_pos, y_pos + height)
+        ]
+    elif int(theta) == THETA_SOUTH:
+        cells = [
+            (x_value, y_pos + height - 1 + offset)
+            for offset in range(1, int(depth) + 1)
+            for x_value in range(x_pos, x_pos + width)
+        ]
+    else:  # THETA_WEST
+        cells = [
+            (x_pos - offset, y_value)
+            for offset in range(1, int(depth) + 1)
+            for y_value in range(y_pos, y_pos + height)
+        ]
+    return tuple(cells)
 
 
 def _rotate_relative_cell(

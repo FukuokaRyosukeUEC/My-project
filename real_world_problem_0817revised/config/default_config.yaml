@@ -47,7 +47,7 @@ time:
 
 capacities:
   default: 3
-  queue: 5                   # 20260629: 待機列 1 セル 5 人
+  queue: 2                   # 待機列 1 セル 2 人（1セル=1m²）
   entrance: 10               # 2 セル合計で毎ステップ最大 20 人
   exit: 10
 
@@ -64,7 +64,7 @@ booth_geometry:
   reception_position: bottom_left
   exit_position: bottom_right
   queue_pattern: left_then_clockwise
-  queue_capacity_per_cell: 5
+  queue_capacity_per_cell: 2
   queue_walkable: false
 
 simulation:

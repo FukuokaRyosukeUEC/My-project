@@ -1,8 +1,9 @@
 """§23.1: 配置制約のテスト。"""
 from __future__ import annotations
 
+from src.models import BoothSpec, Config
 from src.constraints import compute_violation
-from src.venue import apply_layout
+from src.venue import apply_layout, build_base_venue
 from tests.conftest import CENTRAL_LAYOUT, PERIMETER_LAYOUT
 
 
@@ -61,3 +62,35 @@ def test_queue_space_detected(cfg, ctx):
 def test_20260629_has_no_extra_corridor_width_constraint(cfg):
     """旧条件どおり、既定の最低通路幅は 1 セルとする。"""
     assert cfg.min_corridor_width == 1
+
+
+def test_other_booth_cannot_intrude_into_front_clearance():
+    """本体同士が非重複でも、他ブースが正面2セルへ入れば無効とする。"""
+
+    booths = tuple(
+        BoothSpec(
+            booth_id=booth_id,
+            width=2,
+            height=2,
+            category="goods",
+            attractiveness=0.5,
+            capacity=1,
+            mean_service_seconds=30.0,
+            max_queue_length=0,
+        )
+        for booth_id in range(2)
+    )
+    local_cfg = Config(
+        grid_width=12,
+        grid_height=12,
+        booth_exit_position="reception",
+        booths=booths,
+        categories=("goods",),
+    )
+    venue = build_base_venue(local_cfg)
+
+    separated = ((2, 4, 2), (6, 4, 2))
+    front_intrusion = ((2, 4, 2), (3, 6, 2))
+
+    assert compute_violation(local_cfg, venue, separated) == 0.0
+    assert compute_violation(local_cfg, venue, front_intrusion) > 0.0
