@@ -179,7 +179,7 @@ class Config:
     max_speed_mps: float = 1.0
     # 容量(§4.4)
     cap_default: int = 3
-    cap_queue: int = 5
+    cap_queue: int = 2
     cap_entrance: int = 10
     cap_exit: int = 10
     # 入口・出口(§4.5)
@@ -195,7 +195,7 @@ class Config:
     reception_position: str = "bottom_left"
     booth_exit_position: str = "top_left"
     queue_pattern: str = "bottom_then_right"
-    queue_capacity_per_cell: int = 5
+    queue_capacity_per_cell: int = 2
     queue_walkable: bool = False
     # シミュレーション(§2.3, §7, §9.3, §12.2, §17.6)
     n_visitors: int = 8000
@@ -524,6 +524,11 @@ def load_config(config_dir: str | Path) -> Config:
     )
     if cfg.queue_capacity_per_cell < 1:
         raise ValueError("booth_geometry.queue_capacity_per_cell must be at least 1")
+    if cfg.cap_queue != cfg.queue_capacity_per_cell:
+        raise ValueError(
+            "capacities.queue and booth_geometry.queue_capacity_per_cell "
+            "must be equal"
+        )
     if cfg.congestion_travel_time_weight < 0.0:
         raise ValueError("simulation.congestion_travel_time_weight must be non-negative")
     if not 0.0 <= cfg.table_after_food_probability <= 1.0:

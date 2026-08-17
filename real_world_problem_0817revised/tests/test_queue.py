@@ -1,9 +1,11 @@
 """§23.3: ブース体験・待ち行列・諦めのテスト。"""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
-from src.models import CHOOSING, EXPERIENCING, QUEUING, WALKING
+from src.models import CHOOSING, EXPERIENCING, QUEUING, WALKING, load_config
 from src.simulator import Simulation
 from src.venue import apply_layout
 from tests.conftest import CENTRAL_LAYOUT
@@ -24,6 +26,14 @@ def arrive(sim: Simulation, v, booth_id: int, t: int = 0) -> None:
     sim.occupancy[ry, rx] += 1
     sim.visitors.append(v)
     sim._arrive_at_reception(v, t)
+
+
+def test_current_config_uses_two_people_per_queue_cell():
+    """現行設定のグリッド容量と待機人数換算を1セル2人へ統一する。"""
+
+    current = load_config(Path(__file__).resolve().parents[1] / "config")
+    assert current.cap_queue == 2
+    assert current.queue_capacity_per_cell == 2
 
 
 def test_capacity_and_queue(cfg, ctx):

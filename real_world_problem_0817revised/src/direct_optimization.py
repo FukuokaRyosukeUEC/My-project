@@ -5,8 +5,8 @@
 幾何形状から計算した制約として扱う。初期集団はbooths.yamlを参照せず、
 位置・向きをランダム貪欲法で決め、幾何制約と1セル幅到達性を満たす
 配置から生成する。4セル幅で到達できるブース数を環境選択で最優先し、
-到達不能対象には3→2→1セル幅の順で経路を割り当てる。整然さ7成分は
-説明用特徴量として保存するだけで、ハード制約には使用しない。
+到達不能対象には3→2→1セル幅の順で経路を割り当てる。正面2セル空間は
+物理制約とし、それ以外の整然さ成分は説明用特徴量として保存する。
 """
 from __future__ import annotations
 
@@ -48,11 +48,13 @@ from .optimization import (
 from .parallel import PENALTY_OBJECTIVE, evaluate_layout, get_context
 from .routing import INF_DIST, bfs_distance_field, descend_path_indices
 from .venue import (
+    FRONT_CLEARANCE_DEPTH_CELLS,
     TARGET_CORRIDOR_WIDTH_CELLS,
     apply_layout,
     booth_cells_of,
     booth_exit_cell,
     build_base_venue,
+    front_clearance_cells,
     oriented_booth_size,
     queue_cells_of,
     reception_cell,
@@ -66,7 +68,6 @@ BOUNDARY_BAND_CELLS = 5.0
 BOUNDARY_ALIGNMENT_TOLERANCE_CELLS = 4.0
 MIN_BOUNDARY_CHAIN_SIZE = 1
 MOTIF_TARGET_SIZE = 3
-FRONT_CLEARANCE_DEPTH_CELLS = 2
 CONSTRAINT_CACHE_MAXSIZE = 50_000
 #: path_turns を測る対象。テーブル・ゴミステーションは付帯設備なので除外し、
 #: 体験ブース同士の移動だけを見る(来場者の主要動線)。
@@ -512,51 +513,6 @@ def _edge_gap(
     return float(max(0, second_start - first_end))
 
 
-def front_clearance_cells(
-    cfg: Config,
-    booth_id: int,
-    x_pos: int,
-    y_pos: int,
-    theta: int,
-    depth: int = FRONT_CLEARANCE_DEPTH_CELLS,
-) -> tuple[tuple[int, int], ...]:
-    """ブース正面に必要な、幅全体×奥行き ``depth`` の通路セルを返す。
-
-    テーブル・椅子には正面がないため空集合を返す。受付1セルだけではなく
-    ブース正面幅全体を確保することで、施工後に正面同士やベンチが主動線を
-    塞ぐ配置を除く。
-    """
-
-    if cfg.booths[booth_id].is_table:
-        return ()
-    width, height = oriented_booth_size(cfg, booth_id, int(theta))
-    if int(theta) == 0:  # north
-        cells = [
-            (x_value, y_pos - offset)
-            for offset in range(1, int(depth) + 1)
-            for x_value in range(x_pos, x_pos + width)
-        ]
-    elif int(theta) == 1:  # east
-        cells = [
-            (x_pos + width - 1 + offset, y_value)
-            for offset in range(1, int(depth) + 1)
-            for y_value in range(y_pos, y_pos + height)
-        ]
-    elif int(theta) == 2:  # south
-        cells = [
-            (x_value, y_pos + height - 1 + offset)
-            for offset in range(1, int(depth) + 1)
-            for x_value in range(x_pos, x_pos + width)
-        ]
-    else:  # west
-        cells = [
-            (x_pos - offset, y_value)
-            for offset in range(1, int(depth) + 1)
-            for y_value in range(y_pos, y_pos + height)
-        ]
-    return tuple(cells)
-
-
 def _claimed_cells_for_position(
     cfg: Config,
     booth_id: int,
@@ -609,9 +565,12 @@ def _front_clearance_violation(
         if spec.is_table:
             continue
         x_pos, y_pos, theta = (int(value) for value in positions[booth_id])
-        for cell_x, cell_y in front_clearance_cells(
-            cfg, booth_id, x_pos, y_pos, theta
-        ):
+        clear_cells = (
+            geometry.front_clearance_cells[booth_id]
+            if geometry is not None
+            else front_clearance_cells(cfg, booth_id, x_pos, y_pos, theta)
+        )
+        for cell_x, cell_y in clear_cells:
             total += 1
             if (
                 not (0 <= cell_x < width and 0 <= cell_y < height)
@@ -1279,7 +1238,7 @@ def _materialize_orderliness(
 
 
 class Direct138LayoutProblem(ElementwiseProblem):
-    """物理＋1セル到達性を必須、4セル達成数を環境選択へ渡す問題。"""
+    """物理・正面2セル・1セル到達性を必須とする直接配置問題。"""
 
     def __init__(
         self,
@@ -2789,7 +2748,9 @@ def run_direct_nsga2(
     # minimize() は既定で algorithm を deepcopy して実行するため、実行履歴は
     # result.algorithm から回収する（元の algorithm は空のまま）。
     result.memetic_history = list(result.algorithm.memetic_history)
-    result.orderliness_constraint_mode = "descriptive_only_not_a_constraint"
+    result.orderliness_constraint_mode = (
+        "front_clearance_hard_other_components_descriptive"
+    )
     result.diversity_settings = {
         "minimum_layout_distance": float(minimum_layout_distance),
         "distance": "mean_booth_displacement_and_orientation_difference",
@@ -2937,7 +2898,7 @@ def save_direct_metadata(result, out_dir: str | Path) -> None:
             "f_congestion": "booth_near_congestion_from_attached_metrics",
         },
         "orderliness": {
-            "role": "descriptive_features_only_not_constraints",
+            "role": "front_clearance_is_physical_constraint_other_features_descriptive",
             "aggregation": "seven_independent_constraints_without_compensation",
             "grouping": "area_x_mixed_plus_active_and_table_checks",
             "motifs": ["interior_horizontal_or_vertical_lane", "venue_boundary_chain"],

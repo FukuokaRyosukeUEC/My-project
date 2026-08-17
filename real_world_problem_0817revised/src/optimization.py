@@ -36,6 +36,7 @@ from .venue import (
     booth_cells_of,
     booth_exit_cell,
     build_base_venue,
+    front_clearance_cells,
     position_bounds,
     queue_cells_of,
     reception_cell,
@@ -230,6 +231,7 @@ def _booth_fits(
     x,
     y,
     theta,
+    front_reserved=None,
 ) -> bool:
     """候補状態 (x, y, theta) が幾何制約を満たすか判定する。"""
     H = cfg.grid_height
@@ -328,14 +330,28 @@ def _booth_fits(
         if int(base[ty, tx]) not in set(int(value) for value in WALKABLE_TYPES):
             return False
 
-    for cx, cy in _booth_claimed_cells(
+    claimed_cells = _booth_claimed_cells(
         cfg,
         booth_id,
         x,
         y,
         theta,
-    ):
-        if occupied[cy, cx]:
+    )
+    for cx, cy in claimed_cells:
+        if occupied[cy, cx] or (
+            front_reserved is not None and front_reserved[cy, cx]
+        ):
+            return False
+
+    # 正面空間同士は共有できるが、既存の本体・受付・退出口・待機列が
+    # 新しいブースの正面2セルへ入ることは許可しない。
+    walkable_types = set(int(value) for value in WALKABLE_TYPES)
+    for cx, cy in front_clearance_cells(cfg, booth_id, x, y, theta):
+        if not (0 <= cx < W and 0 <= cy < H):
+            return False
+        if int(base[cy, cx]) not in walkable_types:
+            return False
+        if occupied[cy, cx] and (cx, cy) not in claimed_cells:
             return False
 
     return True
@@ -358,6 +374,7 @@ def _greedy_layout_attempt(
         (H, W),
         dtype=bool,
     )
+    front_reserved = np.zeros((H, W), dtype=bool)
 
     order = sorted(
         range(n_booths),
@@ -436,6 +453,7 @@ def _greedy_layout_attempt(
                 x,
                 y,
                 theta,
+                front_reserved=front_reserved,
             ):
                 for cx, cy in _booth_claimed_cells(
                     cfg,
@@ -445,6 +463,11 @@ def _greedy_layout_attempt(
                     theta,
                 ):
                     occupied[cy, cx] = True
+
+                for cx, cy in front_clearance_cells(
+                    cfg, booth_id, x, y, theta
+                ):
+                    front_reserved[cy, cx] = True
 
                 positions[booth_id] = (x, y, theta)
 
