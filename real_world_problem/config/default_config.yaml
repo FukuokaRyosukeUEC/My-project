@@ -42,12 +42,14 @@ venue_shape:
 
 time:
   dt_seconds: 1.0
-  duration_seconds: 400      # simulate_result.py の SPEC_DEFAULTS.T
+  duration_seconds: 3600     # 実イベントのピーク 1 時間を対象にする。
+                             # booths.yaml の最長体験 600 秒(ジャズ)を収容できる長さ。
   max_speed_mps: 1.0
 
 capacities:
   default: 3
-  queue: 5                   # 20260629: 待機列 1 セル 5 人
+  queue: 3                   # 待機列 1 セル 3 人(≒3 人/m²)。行列の実密度は 2〜3 人/m²。
+                             # 5 人/m² は群集事故が起きる水準で、行列としては非現実的。
   entrance: 10               # 2 セル合計で毎ステップ最大 20 人
   exit: 10
 
@@ -64,35 +66,39 @@ booth_geometry:
   reception_position: bottom_left
   exit_position: bottom_right
   queue_pattern: left_then_clockwise
-  queue_capacity_per_cell: 5
+  queue_capacity_per_cell: 3   # capacities.queue と揃える
   queue_walkable: false
 
 simulation:
-  n_visitors: 200           # 20 人/step × 400 step
+  n_visitors: 900           # 駅前広場イベントのピーク 1 時間で 0.25 人/秒 × 3600 秒。
+                            # ※ 計算コストが問題になる場合はここをサンプリング倍率として
+                            #    下げる(ブース値の実態とは別の判断)。
   evaluation_seed: 0
   safe_occupancy_ratio: 0.67 # §12.2
-  timeout_seconds: 5.0       # §17.6
+  timeout_seconds: 120.0     # §17.6。3600 秒 × 900 人で 1 評価あたり実測 30 秒前後。
   replan_interval_steps: 10  # §9.3
   blocked_replan_count: 3    # §9.3
   # セル占有率 r に対し、1セルの所要時間を (1 + weight * r^2) 倍する。
   # weight=1.0 の場合、占有率50%で1.25倍、100%で2倍。
   congestion_travel_time_weight: 1.0
   softmax_temperature: 0.3   # §8
-  q_norm_seconds: 600.0      # §8 Q_norm
+  q_norm_seconds: 900.0      # §8 Q_norm。待ち 15 分で待ち時間ペナルティが最大になる
   giveup_utility_penalty: 0.5   # §8 諦めブースへの減点
   utility_min_threshold: 0.0    # §8 全候補がこの値未満なら EXITING
 
 # 疲労とテーブル（ベンチ）利用。
 # 疲労度は 0～1。歩行・待機・体験で増え、着席中に減る。
 resting:
-  rest_seconds: 45
+  rest_seconds: 900             # 飲食の着席時間は 15〜20 分。45 秒は着席とみなせない
   after_food_probability: 0.65  # 飲食体験後にテーブルへ向かう来場者の割合
   after_categories: [food]
   fatigue_threshold: 0.65       # この疲労度以上でもテーブルを探す
   fatigue_walk_per_second: 0.0025
   fatigue_wait_per_second: 0.0008
   fatigue_experience_per_second: 0.0004
-  fatigue_recovery_per_second: 0.015
+  fatigue_recovery_per_second: 0.0012  # 着席 900 秒でほぼ全快する速度。0.015 だと 67 秒で
+                                       # 全快し、残りの着席時間が無意味になる。
+                                       # 増加レート 3 項目は物理量なので変更しない。
   occupancy_weight: 0.5         # テーブル選択時の満席度ペナルティ
 
 utility_weights:             # §8 既定重み
@@ -114,14 +120,16 @@ utility_weights:             # §8 既定重み
 #                    ペース配分を変更できる(コード変更は不要)。
 # 例: 開場直後は少なく→昼前後にピーク→終盤にまた落ち着く来場ペース。
 arrival_profile:
-  - [0,   40,  0.3]   # 開場直後: 閑散
-  - [40,  120, 1.0]   # 立ち上がり: 通常
-  - [120, 280, 1.6]   # 昼のピーク: 混雑
-  - [280, 360, 1.0]   # 落ち着き: 通常
-  - [360, 400, 0.3]   # 終盤: 閑散
+  - [0,    360,  0.3]   # 開場直後: 閑散
+  - [360,  1080, 1.0]   # 立ち上がり: 通常
+  - [1080, 2520, 1.6]   # 昼のピーク: 混雑
+  - [2520, 3240, 1.0]   # 落ち着き: 通常
+  - [3240, 3600, 0.3]   # 終盤: 閑散
 
 constraints:
-  min_corridor_width: 1      # 20260629 には最低通路幅の追加制約なし
+  min_corridor_width: 1      # 20260629 には最低通路幅の追加制約なし。
+                             # models.py が 4 を下限として強制していたのを撤廃したので、
+                             # ここの指定が実効値になる(旧: 46 個中 19 個が到達不能)。
 
 happiness:                   # §13 補助KPI
   alpha: 0.05

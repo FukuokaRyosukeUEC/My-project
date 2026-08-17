@@ -29,8 +29,23 @@ EXIT = 6
 #: 通行可能セル種別(§4.2【v2】)。FORBIDDEN は「配置不可だが通行可」を既定とする。
 WALKABLE_TYPES = (EMPTY, FORBIDDEN, QUEUE, ENTRANCE, EXIT)
 
-#: 人が通行できる通路の物理的な最小幅。設定値がこれを下回っても、
-#: シミュレーションと配置制約では 4 セルを下限として扱う。
+#: `constraints.min_corridor_width` を YAML で指定しなかった場合の既定値。
+#:
+#: 2026-08-17: 以前はこの値を「下限」として `max()` で強制していたが、
+#: それを取りやめて既定値のみとした。理由は 3 つ。
+#:   1. `passable_corridor_mask` は「各通行可能セルが少なくとも 1 つの
+#:      w×w 全通行可能ブロックに属すること」を要求する。w=4 だと、
+#:      ブース本体と待機列セルに挟まれる受付セルは構造的にこの条件を
+#:      満たせず、`layout.walkable` から落ちる。
+#:   2. 落ちた受付セルは `routing._bfs_distance_field_python` の
+#:      シード判定 `walkable[y, x]` で弾かれ、静的距離場が全域 INF になる。
+#:      実会場の固定配置では 46 個中 19 個がこれで到達不能だった。
+#:   3. `constraints.compute_violation` は通路幅フィルタ**前**の
+#:      `layout.raw_walkable` で到達性を判定するため g = 0 のまま通り、
+#:      この不整合がどこにも報告されなかった。
+#: `default_config.yaml` の `min_corridor_width: 1`(「20260629 には最低通路幅の
+#: 追加制約なし」)という記述どおりの挙動に戻す。より広い通路幅を課したい場合は
+#: YAML 側で明示的に指定する。
 MIN_PEDESTRIAN_CORRIDOR_WIDTH_CELLS = 4
 
 # ---------------------------------------------------------------- 来場者状態(§6.2)
@@ -484,8 +499,11 @@ def load_config(config_dir: str | Path) -> Config:
         w_queue=float(uw["queue"]),
         w_crowd=float(uw["crowd"]),
         arrival_profile=tuple(tuple(float(v) for v in row) for row in main["arrival_profile"]),
+        # YAML の値をそのまま使う(1 未満だけは弾く)。以前はここで
+        # MIN_PEDESTRIAN_CORRIDOR_WIDTH_CELLS を下限として強制していたため、
+        # YAML に 1 と書いても実効値が 4 になっていた。
         min_corridor_width=max(
-            MIN_PEDESTRIAN_CORRIDOR_WIDTH_CELLS,
+            1,
             int(
                 (main.get("constraints") or {}).get(
                     "min_corridor_width",

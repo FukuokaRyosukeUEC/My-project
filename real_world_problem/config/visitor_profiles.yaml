@@ -16,8 +16,10 @@ profiles:
     ratio: 0.7                  # 会場に来た人(ブースを回る)
     speed_mps: 1.0
     congestion_avoidance: 1.0
-    queue_tolerance_seconds: 400
-    max_visit_seconds: 400
+    queue_tolerance_seconds: 900  # 人気ブースには 15 分は並ぶ
+    max_visit_seconds: 3600       # 会場滞在 1 時間。屋外イベントの平均滞在時間。
+                                  # 体験時間(最長 600 秒)に対して十分な長さが必要で、
+                                  # 短すぎると諦め判定で容量が空いていても入場できない。
     distance_weight_factor: 1.0
     interest_mode: uniform
   - name: "通り抜け"
@@ -25,7 +27,7 @@ profiles:
     speed_mps: 1.0
     congestion_avoidance: 1.0
     queue_tolerance_seconds: 0  # 以下 4 項目は passerby では未使用
-    max_visit_seconds: 400
+    max_visit_seconds: 3600
     distance_weight_factor: 1.0
     interest_mode: uniform
     passerby: true
