@@ -104,14 +104,14 @@ class RunParams:
     max_front_clearance_violation: float = 0.0
     max_wide_aisle_deficit: float = 0.35
     # 体験ブース間の最短経路上で許容する平均方向転換回数(0〜1 ではなく回数)。
-    max_path_turns: float = 4.5
+    max_path_turns: float = 4.0
 
     # 3 段階突然変異 + Memetic 局所探索。
     mutation_individual_prob: float = 0.20
     mutation_local_weight: float = 0.55
     mutation_meso_weight: float = 0.30
     mutation_macro_weight: float = 0.15
-    exploration_generations: int = 30
+    exploration_generations: int = 100
     exploration_individual_prob: float = 0.40
     exploration_local_weight: float = 0.20
     exploration_meso_weight: float = 0.30
@@ -119,9 +119,9 @@ class RunParams:
     donor_pool_size: int = 32
     donor_minimum_distance: float = 0.05
     donor_refresh_probability: float = 0.25
-    minimum_layout_distance: float = 0.08
+    minimum_layout_distance: float = 0.15
     memetic_interval: int = 5
-    memetic_start_generation: int = 30
+    memetic_start_generation: int = 101
     memetic_parents: int = 10
     memetic_neighbors: int = 10
     memetic_max_neighbor_trials: int = 1000

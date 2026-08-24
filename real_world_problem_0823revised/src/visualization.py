@@ -625,13 +625,30 @@ def plot_time_series_comparison(
     plt.close(fig)
 
 
-def plot_heatmaps(cfg: Config, layout: Layout, heatmap, over_map, path: str | Path, title="") -> None:
+def plot_heatmaps(
+    cfg: Config,
+    layout: Layout,
+    heatmap,
+    over_map,
+    path: str | Path,
+    title="",
+    *,
+    show_over_map: bool = True,
+) -> None:
     """§20.2: ヒートマップへ属性色と広場区画境界を重ねて描画する。"""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    for ax, data, name in (
-        (axes[0], heatmap, "cumulative presence [person-steps]"),
-        (axes[1], over_map, "time over safe occupancy [s]"),
-    ):
+    if show_over_map:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        plot_items = (
+            (axes[0], heatmap, "cumulative presence [person-steps]"),
+            (axes[1], over_map, "time over safe occupancy [s]"),
+        )
+    else:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        plot_items = (
+            (ax, heatmap, "cumulative presence [person-steps]"),
+        )
+
+    for ax, data, name in plot_items:
         masked = np.where(layout.walkable, data, np.nan)
         im = ax.imshow(masked, cmap="hot_r", origin="upper")
         draw_venue_outline(ax, cfg, layout)

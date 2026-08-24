@@ -38,7 +38,7 @@ VIZ_TIMEOUT_SECONDS = 3600.0
 #: src/visualization.py の見た目を変えたら +1 する(古い画像の再利用を防ぐ)。
 #: 2: テーブル・椅子を灰色の矩形から fig/table.png のアイコンに変更。
 #: 3: 選択解の実際の歩行可能セルを重ねた通路図を追加。
-RENDER_VERSION = 10
+RENDER_VERSION = 11
 
 VENUE_FIGURE_WIDTH = 9.0
 VENUE_AXES_LEFT = 0.02
@@ -233,7 +233,7 @@ def render_walkable_corridors(
 
 @_serialized_render
 def render_heatmap(cfg: Config, ctx: StaticContext, x, path: Path) -> tuple[Path, dict]:
-    """混雑ヒートマップ(累積滞在 + 閾値超過)を PNG で保存する。
+    """累積滞在人数のヒートマップを PNG で保存する。
 
     戻り値は (画像パス, KPI dict)。
     """
@@ -249,6 +249,7 @@ def render_heatmap(cfg: Config, ctx: StaticContext, x, path: Path) -> tuple[Path
         result.over_threshold_map,
         path,
         title="選択解",
+        show_over_map=False,
     )
 
     kpis = dict(result.kpis)

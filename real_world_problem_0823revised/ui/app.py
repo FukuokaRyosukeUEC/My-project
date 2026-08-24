@@ -39,7 +39,7 @@ st.set_page_config(
 
 POLL_SECONDS = 2.0
 PARETO_CHART_SIZE = 760
-UI_RENDER_VERSION = 10
+UI_RENDER_VERSION = 11
 
 #: 比較基準(booths.yaml の fixed_position = 実会場で実際に使われた配置)を
 #: スナップショット内の解と区別するための擬似インデックス。
@@ -53,6 +53,9 @@ BASELINE_COLOR = "#2ca02c"
 def ensure_render_version(expected_version: int) -> None:
     """開発中の再実行でも最新の描画モジュールを使用する。"""
     if int(render.RENDER_VERSION) != int(expected_version):
+        from src import visualization
+
+        importlib.reload(visualization)
         importlib.reload(render)
 
 
@@ -104,10 +107,16 @@ def cached_walkable_png(
 
 
 @st.cache_data(show_spinner=False)
-def cached_heatmap_png(config_dir: str, x: tuple, out_dir: str) -> tuple[str, dict]:
+def cached_heatmap_png(
+    config_dir: str,
+    x: tuple,
+    out_dir: str,
+    render_version: int,
+) -> tuple[str, dict]:
+    ensure_render_version(render_version)
     cfg = get_config(config_dir)
     ctx = get_viz_context(config_dir)
-    path = Path(out_dir) / f"heatmap_{render.design_key(x)}_v{render.RENDER_VERSION}.png"
+    path = Path(out_dir) / f"heatmap_{render.design_key(x)}_v{render_version}.png"
     _, kpis = render.render_heatmap(cfg, ctx, x, path)
     return str(path), kpis
 
@@ -1031,12 +1040,13 @@ def solution_panel(
 
     with tab_heat:
         st.caption(
-            "この解を 1 回シミュレーションして、累積滞在人数と混雑閾値の"
-            "超過時間を描画します。"
+            "この解を 1 回シミュレーションして、累積滞在人数を描画します。"
         )
         if st.button("ヒートマップを生成", key=f"heat_{render.design_key(x)}"):
             with st.spinner("シミュレーション中..."):
-                png, kpis = cached_heatmap_png(config_dir, x, cache_dir)
+                png, kpis = cached_heatmap_png(
+                    config_dir, x, cache_dir, UI_RENDER_VERSION
+                )
             st.image(png)
             st.dataframe(
                 pd.DataFrame([kpis]).T.rename(columns={0: "値"}),
