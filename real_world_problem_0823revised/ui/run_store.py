@@ -111,7 +111,7 @@ class RunParams:
     mutation_local_weight: float = 0.55
     mutation_meso_weight: float = 0.30
     mutation_macro_weight: float = 0.15
-    exploration_generations: int = 100
+    exploration_generations: int = 200
     exploration_individual_prob: float = 0.40
     exploration_local_weight: float = 0.20
     exploration_meso_weight: float = 0.30
@@ -121,7 +121,7 @@ class RunParams:
     donor_refresh_probability: float = 0.25
     minimum_layout_distance: float = 0.15
     memetic_interval: int = 5
-    memetic_start_generation: int = 101
+    memetic_start_generation: int = 201
     memetic_parents: int = 10
     memetic_neighbors: int = 10
     memetic_max_neighbor_trials: int = 1000
